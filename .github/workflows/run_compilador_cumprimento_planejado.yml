@@ -1,1 +1,30 @@
-GOOGLE_CREDENTIALS_B64
+name: Copiar Plan_Principal para BARREIRAS
+
+on:
+  workflow_dispatch:
+
+  # Opcional: roda todos os dias às 07:00 no horário de Brasília.
+  # GitHub Actions usa UTC, então 10:00 UTC = 07:00 BRT.
+  schedule:
+    - cron: "0 10 * * *"
+
+jobs:
+  copiar-dados:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Executar script
+        env:
+          GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+        run: python main.py
