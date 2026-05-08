@@ -27,4 +27,4 @@ jobs:
       - name: Executar script
         env:
           GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
-        run: python main.py
+        run: python compilador.py
