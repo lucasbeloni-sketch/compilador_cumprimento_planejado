@@ -14,34 +14,42 @@ from google.oauth2.service_account import Credentials
 
 ORIGEM_ID = "1OTHF2ytEOjGgfE49paARXkz9GjaklOQC_UhiXwUjC2E"
 ORIGEM_ABA = "Plan_Principal"
-ORIGEM_RANGE = "B6:BX"
+
+# Lê somente até BE, pois a última coluna necessária é BE.
+ORIGEM_RANGE = "B6:BE"
 
 DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
 DESTINO_ABA = "BARREIRAS"
 
 CELULA_DATA_REFERENCIA = "B2"
 
-# B:BX possui 75 colunas.
-# Ao colar a partir de A, o intervalo final será A:BW.
-QTD_COLUNAS = 75
-DESTINO_RANGE_LIMPAR = "A4:BW"
+# Agora serão coladas apenas 9 colunas no destino: A:I
+QTD_COLUNAS_DESTINO = 9
+DESTINO_RANGE_LIMPAR = "A4:I"
 
-# Índices das colunas no destino, base zero.
-# A = 0, B = 1, C = 2...
-COLUNA_DATA = 0
-
-COLUNAS_MOEDA = [
-    36,  # AK
-    37,  # AL
-    39,  # AN
+# Índices relativos ao intervalo B:BE
+# B=0, C=1, D=2...
+COLUNAS_ORIGEM_SELECIONADAS = [
+    0,   # B
+    5,   # G
+    6,   # H
+    11,  # M
+    36,  # AL
+    37,  # AM
+    38,  # AN
+    46,  # AV
+    55,  # BE
 ]
 
-COLUNAS_DURACAO = [
-    62,  # BK
-    63,  # BL
-    64,  # BM
-    65,  # BN
-    66,  # BO
+# No destino compacto:
+# A = Data
+# E, F, G = colunas vindas de AL, AM, AN
+COLUNA_DATA_DESTINO = 0
+
+COLUNAS_MOEDA_DESTINO = [
+    4,  # E
+    5,  # F
+    6,  # G
 ]
 
 
@@ -78,7 +86,7 @@ def autenticar_google_sheets():
 # FUNÇÕES AUXILIARES
 # ==========================
 
-def normalizar_linha(linha, qtd_colunas=QTD_COLUNAS):
+def normalizar_linha(linha, qtd_colunas):
     linha = list(linha)
 
     if len(linha) < qtd_colunas:
@@ -140,21 +148,10 @@ def converter_para_data(valor):
 
 
 def data_para_serial_google_sheets(data_valor):
-    """
-    Converte date para número serial usado pelo Google Sheets.
-    """
     return (data_valor - date(1899, 12, 30)).days
 
 
 def converter_moeda_para_numero(valor):
-    """
-    Converte valores como:
-    R$ 1.234,56
-    1.234,56
-    1234,56
-    1234.56
-    para número decimal.
-    """
     if valor is None:
         return ""
 
@@ -175,7 +172,6 @@ def converter_moeda_para_numero(valor):
     texto = texto.replace("R$", "")
     texto = texto.replace(" ", "")
     texto = texto.replace("\u00a0", "")
-
     texto = re.sub(r"[^0-9,.\-]", "", texto)
 
     if not texto:
@@ -186,7 +182,6 @@ def converter_moeda_para_numero(valor):
         texto = texto.replace("-", "")
 
     if "," in texto and "." in texto:
-        # Padrão brasileiro: 1.234,56
         if texto.rfind(",") > texto.rfind("."):
             texto = texto.replace(".", "").replace(",", ".")
         else:
@@ -195,7 +190,6 @@ def converter_moeda_para_numero(valor):
         texto = texto.replace(".", "").replace(",", ".")
     elif "." in texto:
         partes = texto.split(".")
-        # Caso seja 1.234, interpreta como milhar
         if len(partes[-1]) == 3 and len(partes) > 1:
             texto = texto.replace(".", "")
 
@@ -206,95 +200,39 @@ def converter_moeda_para_numero(valor):
         return valor
 
 
-def converter_duracao_para_numero(valor):
-    """
-    Converte duração para o formato numérico do Google Sheets.
-
-    Exemplos:
-    08:00:00 -> 0,333333...
-    08:30 -> 0,354166...
-    30:00:00 -> 1,25
-    8 -> 8 horas -> 0,333333...
-    """
-    if valor is None:
-        return ""
-
-    if isinstance(valor, (int, float)):
-        if valor == 0:
-            return 0
-
-        # Se for maior que 1, interpreta como horas.
-        # Exemplo: 8 = 8 horas.
-        if valor > 1:
-            return valor / 24
-
-        # Se for menor ou igual a 1, já pode ser fração de dia.
-        return valor
-
-    texto = str(valor).strip()
-
-    if texto in ["", "-", "—"]:
-        return ""
-
-    texto = texto.replace("\u00a0", " ").strip()
-
-    if ":" in texto:
-        partes = texto.split(":")
-
-        try:
-            if len(partes) == 3:
-                horas = int(partes[0])
-                minutos = int(partes[1])
-                segundos = float(partes[2].replace(",", "."))
-            elif len(partes) == 2:
-                horas = int(partes[0])
-                minutos = int(partes[1])
-                segundos = 0
-            else:
-                return valor
-
-            total_segundos = (horas * 3600) + (minutos * 60) + segundos
-            return total_segundos / 86400
-
-        except Exception:
-            return valor
-
-    texto_numero = texto.replace(",", ".")
-
-    try:
-        numero = float(texto_numero)
-
-        if numero > 1:
-            return numero / 24
-
-        return numero
-
-    except Exception:
-        return valor
-
-
-def preparar_linha_para_envio(linha):
-    linha = normalizar_linha(linha)
-
-    # Coluna A: Data
-    data_valor = converter_para_data(linha[COLUNA_DATA])
-    if data_valor:
-        linha[COLUNA_DATA] = data_para_serial_google_sheets(data_valor)
-
-    # Colunas de moeda
-    for indice in COLUNAS_MOEDA:
-        linha[indice] = converter_moeda_para_numero(linha[indice])
-
-    # Colunas de duração
-    for indice in COLUNAS_DURACAO:
-        linha[indice] = converter_duracao_para_numero(linha[indice])
-
-    return linha
-
-
 def eh_data_referencia(valor, data_referencia):
     data_valor = converter_para_data(valor)
     return data_valor == data_referencia
+
+
+def selecionar_colunas_origem(linha):
+    """
+    Seleciona apenas:
+    B, G, H, M, AL, AM, AN, AV e BE
+    do intervalo origem B:BE.
+    """
+    linha = normalizar_linha(linha, 56)
+
+    return [
+        linha[indice] if indice < len(linha) else ""
+        for indice in COLUNAS_ORIGEM_SELECIONADAS
+    ]
+
+
+def preparar_linha_para_envio(linha):
+    linha = normalizar_linha(linha, QTD_COLUNAS_DESTINO)
+
+    # Coluna A: Data
+    data_valor = converter_para_data(linha[COLUNA_DATA_DESTINO])
+
+    if data_valor:
+        linha[COLUNA_DATA_DESTINO] = data_para_serial_google_sheets(data_valor)
+
+    # Colunas E, F e G: Moeda
+    for indice in COLUNAS_MOEDA_DESTINO:
+        linha[indice] = converter_moeda_para_numero(linha[indice])
+
+    return linha
 
 
 def garantir_linhas_suficientes(aba, ultima_linha_necessaria):
@@ -321,13 +259,6 @@ def escrever_em_blocos(aba, dados, linha_inicial=4, coluna_inicial="A", tamanho_
 
 
 def aplicar_formatacao_destino(planilha_destino, aba_destino):
-    """
-    Aplica formatação a partir da linha 4.
-    A = Data
-    AK, AL, AN = Moeda
-    BK:BO = Duração
-    """
-
     sheet_id = aba_destino.id
 
     requests = []
@@ -361,22 +292,13 @@ def aplicar_formatacao_destino(planilha_destino, aba_destino):
         padrao="dd/mm/yyyy"
     )
 
-    # AK, AL, AN: Moeda
-    for coluna in COLUNAS_MOEDA:
+    # Colunas E, F e G: Moeda
+    for coluna in COLUNAS_MOEDA_DESTINO:
         adicionar_formatacao_coluna(
             coluna_inicio=coluna,
             coluna_fim=coluna + 1,
             tipo="CURRENCY",
             padrao='"R$" #,##0.00'
-        )
-
-    # BK:BO: Duração
-    for coluna in COLUNAS_DURACAO:
-        adicionar_formatacao_coluna(
-            coluna_inicio=coluna,
-            coluna_fim=coluna + 1,
-            tipo="NUMBER",
-            padrao="[h]:mm:ss"
         )
 
     if requests:
@@ -405,8 +327,8 @@ def main():
 
     if not data_referencia:
         raise Exception(
-            f"Não foi possível identificar uma data válida na célula {CELULA_DATA_REFERENCIA} da aba {DESTINO_ABA}. "
-            f"Valor encontrado: {valor_data_referencia}"
+            f"Não foi possível identificar uma data válida na célula {CELULA_DATA_REFERENCIA} "
+            f"da aba {DESTINO_ABA}. Valor encontrado: {valor_data_referencia}"
         )
 
     print(f"Data de referência considerada: {data_referencia.strftime('%d/%m/%Y')}")
@@ -419,18 +341,26 @@ def main():
     )
 
     dados_origem = [
-        normalizar_linha(linha)
+        normalizar_linha(linha, 56)
         for linha in dados_origem
         if linha_tem_dados(linha)
     ]
 
-    dados_data_referencia = [
+    # Filtra pela coluna B da origem.
+    # Como o intervalo começa em B, a coluna B é o índice 0.
+    dados_origem_filtrados = [
         linha
         for linha in dados_origem
         if eh_data_referencia(linha[0], data_referencia)
     ]
 
-    print(f"Linhas encontradas para a data de referência na origem: {len(dados_data_referencia)}")
+    print(f"Linhas encontradas para a data de referência na origem: {len(dados_origem_filtrados)}")
+
+    # Seleciona apenas as colunas desejadas.
+    dados_data_referencia = [
+        selecionar_colunas_origem(linha)
+        for linha in dados_origem_filtrados
+    ]
 
     print("Lendo dados atuais do destino...")
 
@@ -440,11 +370,12 @@ def main():
     )
 
     dados_destino = [
-        normalizar_linha(linha)
+        normalizar_linha(linha, QTD_COLUNAS_DESTINO)
         for linha in dados_destino
         if linha_tem_dados(linha)
     ]
 
+    # Remove do destino as linhas onde a coluna A for igual à data de referência.
     dados_destino_sem_data_referencia = [
         linha
         for linha in dados_destino
