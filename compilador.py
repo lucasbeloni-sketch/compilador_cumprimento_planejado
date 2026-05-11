@@ -2,7 +2,6 @@ import os
 import json
 import base64
 from datetime import datetime, date, timedelta
-from zoneinfo import ZoneInfo
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -18,14 +17,14 @@ ORIGEM_RANGE = "B6:BX"
 
 DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
 DESTINO_ABA = "BARREIRAS"
-DESTINO_INICIO = "A4"
+
+# A data será lida desta célula da aba destino
+CELULA_DATA_REFERENCIA = "B2"
 
 # B:BX possui 75 colunas.
 # Ao colar a partir de A, o intervalo final será A:BW.
 QTD_COLUNAS = 75
 DESTINO_RANGE_LIMPAR = "A4:BW"
-
-TIMEZONE = "America/Sao_Paulo"
 
 
 # ==========================
@@ -62,9 +61,6 @@ def autenticar_google_sheets():
 # ==========================
 
 def normalizar_linha(linha, qtd_colunas=QTD_COLUNAS):
-    """
-    Garante que todas as linhas tenham a mesma quantidade de colunas.
-    """
     linha = list(linha)
 
     if len(linha) < qtd_colunas:
@@ -97,7 +93,6 @@ def converter_para_data(valor):
 
     if isinstance(valor, (int, float)):
         try:
-            # Google Sheets usa 1899-12-30 como base do número serial.
             return date(1899, 12, 30) + timedelta(days=int(valor))
         except Exception:
             return None
@@ -108,11 +103,8 @@ def converter_para_data(valor):
         return None
 
     texto = texto.replace("\u00a0", " ")
-
-    # Caso venha com horário junto
     texto_sem_hora = texto.split(" ")[0].strip()
 
-    # Caso venha como serial em texto
     try:
         numero = float(texto_sem_hora.replace(",", "."))
         if numero > 30000:
@@ -137,15 +129,12 @@ def converter_para_data(valor):
     return None
 
 
-def eh_data_hoje(valor, hoje):
+def eh_data_referencia(valor, data_referencia):
     data_valor = converter_para_data(valor)
-    return data_valor == hoje
+    return data_valor == data_referencia
 
 
 def garantir_linhas_suficientes(aba, ultima_linha_necessaria):
-    """
-    Garante que a aba tenha linhas suficientes para receber os dados.
-    """
     linhas_atuais = aba.row_count
 
     if ultima_linha_necessaria > linhas_atuais:
@@ -153,9 +142,6 @@ def garantir_linhas_suficientes(aba, ultima_linha_necessaria):
 
 
 def escrever_em_blocos(aba, dados, linha_inicial=4, coluna_inicial="A", tamanho_bloco=1000):
-    """
-    Escreve os dados em blocos para evitar erro em bases maiores.
-    """
     if not dados:
         return
 
@@ -176,10 +162,6 @@ def escrever_em_blocos(aba, dados, linha_inicial=4, coluna_inicial="A", tamanho_
 # ==========================
 
 def main():
-    hoje = datetime.now(ZoneInfo(TIMEZONE)).date()
-
-    print(f"Data de hoje considerada: {hoje.strftime('%d/%m/%Y')}")
-
     gc = autenticar_google_sheets()
 
     planilha_origem = gc.open_by_key(ORIGEM_ID)
@@ -187,6 +169,21 @@ def main():
 
     planilha_destino = gc.open_by_key(DESTINO_ID)
     aba_destino = planilha_destino.worksheet(DESTINO_ABA)
+
+    valor_data_referencia = aba_destino.acell(
+        CELULA_DATA_REFERENCIA,
+        value_render_option="FORMATTED_VALUE"
+    ).value
+
+    data_referencia = converter_para_data(valor_data_referencia)
+
+    if not data_referencia:
+        raise Exception(
+            f"Não foi possível identificar uma data válida na célula {CELULA_DATA_REFERENCIA} da aba {DESTINO_ABA}. "
+            f"Valor encontrado: {valor_data_referencia}"
+        )
+
+    print(f"Data de referência considerada: {data_referencia.strftime('%d/%m/%Y')}")
 
     print("Lendo dados da origem...")
 
@@ -202,13 +199,13 @@ def main():
     ]
 
     # Como o intervalo começa em B, a coluna B da origem vira índice 0.
-    dados_hoje = [
+    dados_data_referencia = [
         linha
         for linha in dados_origem
-        if eh_data_hoje(linha[0], hoje)
+        if eh_data_referencia(linha[0], data_referencia)
     ]
 
-    print(f"Linhas encontradas para hoje na origem: {len(dados_hoje)}")
+    print(f"Linhas encontradas para a data de referência na origem: {len(dados_data_referencia)}")
 
     print("Lendo dados atuais do destino...")
 
@@ -223,18 +220,21 @@ def main():
         if linha_tem_dados(linha)
     ]
 
-    # Remove do destino as linhas onde a coluna A for a data de hoje.
-    dados_destino_sem_hoje = [
+    # Remove do destino as linhas onde a coluna A for igual à data de referência.
+    dados_destino_sem_data_referencia = [
         linha
         for linha in dados_destino
-        if not eh_data_hoje(linha[0], hoje)
+        if not eh_data_referencia(linha[0], data_referencia)
     ]
 
-    print(f"Linhas antigas mantidas no destino: {len(dados_destino_sem_hoje)}")
-    print(f"Linhas removidas do destino por serem de hoje: {len(dados_destino) - len(dados_destino_sem_hoje)}")
+    print(f"Linhas antigas mantidas no destino: {len(dados_destino_sem_data_referencia)}")
+    print(
+        f"Linhas removidas do destino por serem da data de referência: "
+        f"{len(dados_destino) - len(dados_destino_sem_data_referencia)}"
+    )
 
-    # Dados de hoje entram primeiro a partir de A4.
-    dados_finais = dados_hoje + dados_destino_sem_hoje
+    # Dados da data de referência entram primeiro a partir de A4.
+    dados_finais = dados_data_referencia + dados_destino_sem_data_referencia
 
     print("Limpando intervalo do destino...")
 
@@ -245,6 +245,7 @@ def main():
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
 
         print("Gravando dados atualizados no destino...")
+
         escrever_em_blocos(
             aba=aba_destino,
             dados=dados_finais,
