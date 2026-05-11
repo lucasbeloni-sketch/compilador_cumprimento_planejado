@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import re
 from datetime import datetime, date, timedelta
 
 import gspread
@@ -18,13 +19,30 @@ ORIGEM_RANGE = "B6:BX"
 DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
 DESTINO_ABA = "BARREIRAS"
 
-# A data será lida desta célula da aba destino
 CELULA_DATA_REFERENCIA = "B2"
 
 # B:BX possui 75 colunas.
 # Ao colar a partir de A, o intervalo final será A:BW.
 QTD_COLUNAS = 75
 DESTINO_RANGE_LIMPAR = "A4:BW"
+
+# Índices das colunas no destino, base zero.
+# A = 0, B = 1, C = 2...
+COLUNA_DATA = 0
+
+COLUNAS_MOEDA = [
+    36,  # AK
+    37,  # AL
+    39,  # AN
+]
+
+COLUNAS_DURACAO = [
+    62,  # BK
+    63,  # BL
+    64,  # BM
+    65,  # BN
+    66,  # BO
+]
 
 
 # ==========================
@@ -74,14 +92,6 @@ def linha_tem_dados(linha):
 
 
 def converter_para_data(valor):
-    """
-    Converte valores possíveis do Google Sheets para date:
-    - 08/05/2026
-    - 2026-05-08
-    - 08/05/2026 00:00:00
-    - número serial de data do Google Sheets
-    """
-
     if valor is None:
         return None
 
@@ -129,6 +139,159 @@ def converter_para_data(valor):
     return None
 
 
+def data_para_serial_google_sheets(data_valor):
+    """
+    Converte date para número serial usado pelo Google Sheets.
+    """
+    return (data_valor - date(1899, 12, 30)).days
+
+
+def converter_moeda_para_numero(valor):
+    """
+    Converte valores como:
+    R$ 1.234,56
+    1.234,56
+    1234,56
+    1234.56
+    para número decimal.
+    """
+    if valor is None:
+        return ""
+
+    if isinstance(valor, (int, float)):
+        return valor
+
+    texto = str(valor).strip()
+
+    if texto in ["", "-", "—"]:
+        return ""
+
+    negativo = False
+
+    if texto.startswith("(") and texto.endswith(")"):
+        negativo = True
+        texto = texto[1:-1]
+
+    texto = texto.replace("R$", "")
+    texto = texto.replace(" ", "")
+    texto = texto.replace("\u00a0", "")
+
+    texto = re.sub(r"[^0-9,.\-]", "", texto)
+
+    if not texto:
+        return ""
+
+    if texto.startswith("-"):
+        negativo = True
+        texto = texto.replace("-", "")
+
+    if "," in texto and "." in texto:
+        # Padrão brasileiro: 1.234,56
+        if texto.rfind(",") > texto.rfind("."):
+            texto = texto.replace(".", "").replace(",", ".")
+        else:
+            texto = texto.replace(",", "")
+    elif "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    elif "." in texto:
+        partes = texto.split(".")
+        # Caso seja 1.234, interpreta como milhar
+        if len(partes[-1]) == 3 and len(partes) > 1:
+            texto = texto.replace(".", "")
+
+    try:
+        numero = float(texto)
+        return -numero if negativo else numero
+    except Exception:
+        return valor
+
+
+def converter_duracao_para_numero(valor):
+    """
+    Converte duração para o formato numérico do Google Sheets.
+
+    Exemplos:
+    08:00:00 -> 0,333333...
+    08:30 -> 0,354166...
+    30:00:00 -> 1,25
+    8 -> 8 horas -> 0,333333...
+    """
+    if valor is None:
+        return ""
+
+    if isinstance(valor, (int, float)):
+        if valor == 0:
+            return 0
+
+        # Se for maior que 1, interpreta como horas.
+        # Exemplo: 8 = 8 horas.
+        if valor > 1:
+            return valor / 24
+
+        # Se for menor ou igual a 1, já pode ser fração de dia.
+        return valor
+
+    texto = str(valor).strip()
+
+    if texto in ["", "-", "—"]:
+        return ""
+
+    texto = texto.replace("\u00a0", " ").strip()
+
+    if ":" in texto:
+        partes = texto.split(":")
+
+        try:
+            if len(partes) == 3:
+                horas = int(partes[0])
+                minutos = int(partes[1])
+                segundos = float(partes[2].replace(",", "."))
+            elif len(partes) == 2:
+                horas = int(partes[0])
+                minutos = int(partes[1])
+                segundos = 0
+            else:
+                return valor
+
+            total_segundos = (horas * 3600) + (minutos * 60) + segundos
+            return total_segundos / 86400
+
+        except Exception:
+            return valor
+
+    texto_numero = texto.replace(",", ".")
+
+    try:
+        numero = float(texto_numero)
+
+        if numero > 1:
+            return numero / 24
+
+        return numero
+
+    except Exception:
+        return valor
+
+
+def preparar_linha_para_envio(linha):
+    linha = normalizar_linha(linha)
+
+    # Coluna A: Data
+    data_valor = converter_para_data(linha[COLUNA_DATA])
+    if data_valor:
+        linha[COLUNA_DATA] = data_para_serial_google_sheets(data_valor)
+
+    # Colunas de moeda
+    for indice in COLUNAS_MOEDA:
+        linha[indice] = converter_moeda_para_numero(linha[indice])
+
+    # Colunas de duração
+    for indice in COLUNAS_DURACAO:
+        linha[indice] = converter_duracao_para_numero(linha[indice])
+
+    return linha
+
+
 def eh_data_referencia(valor, data_referencia):
     data_valor = converter_para_data(valor)
     return data_valor == data_referencia
@@ -155,6 +318,69 @@ def escrever_em_blocos(aba, dados, linha_inicial=4, coluna_inicial="A", tamanho_
             range_name=celula_inicio,
             value_input_option="USER_ENTERED"
         )
+
+
+def aplicar_formatacao_destino(planilha_destino, aba_destino):
+    """
+    Aplica formatação a partir da linha 4.
+    A = Data
+    AK, AL, AN = Moeda
+    BK:BO = Duração
+    """
+
+    sheet_id = aba_destino.id
+
+    requests = []
+
+    def adicionar_formatacao_coluna(coluna_inicio, coluna_fim, tipo, padrao):
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 3,
+                    "startColumnIndex": coluna_inicio,
+                    "endColumnIndex": coluna_fim
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {
+                            "type": tipo,
+                            "pattern": padrao
+                        }
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat"
+            }
+        })
+
+    # Coluna A: Data
+    adicionar_formatacao_coluna(
+        coluna_inicio=0,
+        coluna_fim=1,
+        tipo="DATE",
+        padrao="dd/mm/yyyy"
+    )
+
+    # AK, AL, AN: Moeda
+    for coluna in COLUNAS_MOEDA:
+        adicionar_formatacao_coluna(
+            coluna_inicio=coluna,
+            coluna_fim=coluna + 1,
+            tipo="CURRENCY",
+            padrao='"R$" #,##0.00'
+        )
+
+    # BK:BO: Duração
+    for coluna in COLUNAS_DURACAO:
+        adicionar_formatacao_coluna(
+            coluna_inicio=coluna,
+            coluna_fim=coluna + 1,
+            tipo="NUMBER",
+            padrao="[h]:mm:ss"
+        )
+
+    if requests:
+        planilha_destino.batch_update({"requests": requests})
 
 
 # ==========================
@@ -198,7 +424,6 @@ def main():
         if linha_tem_dados(linha)
     ]
 
-    # Como o intervalo começa em B, a coluna B da origem vira índice 0.
     dados_data_referencia = [
         linha
         for linha in dados_origem
@@ -220,7 +445,6 @@ def main():
         if linha_tem_dados(linha)
     ]
 
-    # Remove do destino as linhas onde a coluna A for igual à data de referência.
     dados_destino_sem_data_referencia = [
         linha
         for linha in dados_destino
@@ -233,12 +457,20 @@ def main():
         f"{len(dados_destino) - len(dados_destino_sem_data_referencia)}"
     )
 
-    # Dados da data de referência entram primeiro a partir de A4.
     dados_finais = dados_data_referencia + dados_destino_sem_data_referencia
+
+    dados_finais = [
+        preparar_linha_para_envio(linha)
+        for linha in dados_finais
+    ]
 
     print("Limpando intervalo do destino...")
 
     aba_destino.batch_clear([DESTINO_RANGE_LIMPAR])
+
+    print("Aplicando formatação no destino...")
+
+    aplicar_formatacao_destino(planilha_destino, aba_destino)
 
     if dados_finais:
         ultima_linha_necessaria = 3 + len(dados_finais)
