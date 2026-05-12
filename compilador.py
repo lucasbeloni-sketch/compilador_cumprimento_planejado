@@ -7,6 +7,7 @@ import io
 import time
 import random
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 
 import gspread
 from gspread.exceptions import APIError, WorksheetNotFound
@@ -23,7 +24,10 @@ DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
 
 CONFIG_ABA = "Config"
 CELULA_DATA_REFERENCIA = "B2"
+CELULA_TIMESTAMP_FINAL = "B1"
 RANGE_IDS_ORIGEM = "B4:B"
+
+TIMEZONE = "America/Sao_Paulo"
 
 PASTA_CSV_BLOCO_3_ID = "1f5Z0f73IZD4rBEssNb9OVtADLVZzttaF"
 
@@ -474,6 +478,26 @@ def aplicar_formatacao_destino(planilha_destino, aba_destino):
             lambda: planilha_destino.batch_update({"requests": requests}),
             descricao=f"aplicar formatação na aba {aba_destino.title}"
         )
+
+
+def atualizar_timestamp_final(aba_config):
+    """
+    Atualiza a célula B1 da aba Config com a data/hora final da execução.
+    """
+
+    agora = datetime.now(ZoneInfo(TIMEZONE))
+    timestamp = agora.strftime("%d/%m/%Y %H:%M:%S")
+
+    print(f"Atualizando timestamp final em {CONFIG_ABA}!{CELULA_TIMESTAMP_FINAL}: {timestamp}")
+
+    executar_com_retry(
+        lambda: aba_config.update(
+            range_name=CELULA_TIMESTAMP_FINAL,
+            values=[[timestamp]],
+            value_input_option="USER_ENTERED"
+        ),
+        descricao=f"atualizar timestamp em {CONFIG_ABA}!{CELULA_TIMESTAMP_FINAL}"
+    )
 
 
 def obter_planilha_origem(gc, origem_id, cache_planilhas):
@@ -1180,6 +1204,8 @@ def main():
         cache_planilhas=cache_planilhas,
         cache_dados=cache_dados
     )
+
+    atualizar_timestamp_final(aba_config)
 
     print("")
     print("Processo completo finalizado com sucesso.")
