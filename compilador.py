@@ -12,19 +12,20 @@ from google.oauth2.service_account import Credentials
 # CONFIGURAÇÕES
 # ==========================
 
-ORIGEM_ID = "1OTHF2ytEOjGgfE49paARXkz9GjaklOQC_UhiXwUjC2E"
+DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
+
+DESTINO_ABA = "BARREIRAS"
+CONFIG_ABA = "Config"
+
+CELULA_DATA_REFERENCIA = "B2"
+RANGE_IDS_ORIGEM = "B4:B"
+
 ORIGEM_ABA = "Plan_Principal"
 
 # Lê somente até BE, pois a última coluna necessária é BE.
 ORIGEM_RANGE = "B6:BE"
 
-DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
-DESTINO_ABA = "BARREIRAS"
-
-CONFIG_ABA = "Config"
-CELULA_DATA_REFERENCIA = "B2"
-
-# Agora serão coladas apenas 9 colunas no destino: A:I
+# Serão coladas apenas 9 colunas no destino: A:I
 QTD_COLUNAS_DESTINO = 9
 DESTINO_RANGE_LIMPAR = "A4:I"
 
@@ -306,15 +307,82 @@ def aplicar_formatacao_destino(planilha_destino, aba_destino):
         planilha_destino.batch_update({"requests": requests})
 
 
+def ler_ids_planilhas_origem(aba_config):
+    valores = aba_config.get(
+        RANGE_IDS_ORIGEM,
+        value_render_option="FORMATTED_VALUE"
+    )
+
+    ids = []
+
+    for linha in valores:
+        if not linha:
+            continue
+
+        id_planilha = str(linha[0]).strip()
+
+        if id_planilha:
+            ids.append(id_planilha)
+
+    # Remove duplicados mantendo a ordem
+    ids_unicos = []
+    vistos = set()
+
+    for id_planilha in ids:
+        if id_planilha not in vistos:
+            ids_unicos.append(id_planilha)
+            vistos.add(id_planilha)
+
+    return ids_unicos
+
+
+def ler_dados_de_uma_origem(gc, origem_id, data_referencia):
+    print(f"Lendo origem: {origem_id}")
+
+    try:
+        planilha_origem = gc.open_by_key(origem_id)
+        aba_origem = planilha_origem.worksheet(ORIGEM_ABA)
+
+        dados_origem = aba_origem.get(
+            ORIGEM_RANGE,
+            value_render_option="FORMATTED_VALUE"
+        )
+
+        dados_origem = [
+            normalizar_linha(linha, 56)
+            for linha in dados_origem
+            if linha_tem_dados(linha)
+        ]
+
+        # Filtra pela coluna B da origem.
+        # Como o intervalo começa em B, a coluna B é o índice 0.
+        dados_filtrados = [
+            linha
+            for linha in dados_origem
+            if eh_data_referencia(linha[0], data_referencia)
+        ]
+
+        dados_selecionados = [
+            selecionar_colunas_origem(linha)
+            for linha in dados_filtrados
+        ]
+
+        print(f"Linhas encontradas nessa origem: {len(dados_selecionados)}")
+
+        return dados_selecionados
+
+    except Exception as erro:
+        print(f"Erro ao processar a origem {origem_id}: {erro}")
+        print("Essa origem será ignorada e o processo seguirá para a próxima.")
+        return []
+
+
 # ==========================
 # PROCESSO PRINCIPAL
 # ==========================
 
 def main():
     gc = autenticar_google_sheets()
-
-    planilha_origem = gc.open_by_key(ORIGEM_ID)
-    aba_origem = planilha_origem.worksheet(ORIGEM_ABA)
 
     planilha_destino = gc.open_by_key(DESTINO_ID)
     aba_destino = planilha_destino.worksheet(DESTINO_ABA)
@@ -335,34 +403,27 @@ def main():
 
     print(f"Data de referência considerada: {data_referencia.strftime('%d/%m/%Y')}")
 
-    print("Lendo dados da origem...")
+    ids_origem = ler_ids_planilhas_origem(aba_config)
 
-    dados_origem = aba_origem.get(
-        ORIGEM_RANGE,
-        value_render_option="FORMATTED_VALUE"
-    )
+    if not ids_origem:
+        raise Exception(
+            f"Nenhum ID de planilha de origem encontrado no intervalo {CONFIG_ABA}!{RANGE_IDS_ORIGEM}."
+        )
 
-    dados_origem = [
-        normalizar_linha(linha, 56)
-        for linha in dados_origem
-        if linha_tem_dados(linha)
-    ]
+    print(f"Quantidade de planilhas de origem encontradas: {len(ids_origem)}")
 
-    # Filtra pela coluna B da origem.
-    # Como o intervalo começa em B, a coluna B é o índice 0.
-    dados_origem_filtrados = [
-        linha
-        for linha in dados_origem
-        if eh_data_referencia(linha[0], data_referencia)
-    ]
+    dados_data_referencia = []
 
-    print(f"Linhas encontradas para a data de referência na origem: {len(dados_origem_filtrados)}")
+    for origem_id in ids_origem:
+        dados_origem = ler_dados_de_uma_origem(
+            gc=gc,
+            origem_id=origem_id,
+            data_referencia=data_referencia
+        )
 
-    # Seleciona apenas as colunas desejadas.
-    dados_data_referencia = [
-        selecionar_colunas_origem(linha)
-        for linha in dados_origem_filtrados
-    ]
+        dados_data_referencia.extend(dados_origem)
+
+    print(f"Total de linhas consolidadas das origens: {len(dados_data_referencia)}")
 
     print("Lendo dados atuais do destino...")
 
