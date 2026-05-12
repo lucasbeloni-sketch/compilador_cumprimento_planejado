@@ -21,6 +21,7 @@ ORIGEM_RANGE = "B6:BE"
 DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
 DESTINO_ABA = "BARREIRAS"
 
+CONFIG_ABA = "Config"
 CELULA_DATA_REFERENCIA = "B2"
 
 # Agora serão coladas apenas 9 colunas no destino: A:I
@@ -317,8 +318,9 @@ def main():
 
     planilha_destino = gc.open_by_key(DESTINO_ID)
     aba_destino = planilha_destino.worksheet(DESTINO_ABA)
+    aba_config = planilha_destino.worksheet(CONFIG_ABA)
 
-    valor_data_referencia = aba_destino.acell(
+    valor_data_referencia = aba_config.acell(
         CELULA_DATA_REFERENCIA,
         value_render_option="FORMATTED_VALUE"
     ).value
@@ -328,7 +330,7 @@ def main():
     if not data_referencia:
         raise Exception(
             f"Não foi possível identificar uma data válida na célula {CELULA_DATA_REFERENCIA} "
-            f"da aba {DESTINO_ABA}. Valor encontrado: {valor_data_referencia}"
+            f"da aba {CONFIG_ABA}. Valor encontrado: {valor_data_referencia}"
         )
 
     print(f"Data de referência considerada: {data_referencia.strftime('%d/%m/%Y')}")
