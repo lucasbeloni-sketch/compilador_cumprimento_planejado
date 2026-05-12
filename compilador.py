@@ -208,6 +208,36 @@ def linha_tem_dados(linha):
     return any(str(celula).strip() != "" for celula in linha)
 
 
+def remover_linhas_vazias_pareadas(dados_base_a_i, dados_extra_o_p, nome_bloco=""):
+    """
+    Remove linhas que ficariam vazias no destino.
+
+    A validação principal é feita em A:I.
+    Se A:I ficar totalmente vazio depois da seleção das colunas,
+    a linha é removida junto com o par correspondente de O:P.
+    """
+
+    base_filtrada = []
+    extra_filtrada = []
+    removidas = 0
+
+    for i, base in enumerate(dados_base_a_i):
+        extra = dados_extra_o_p[i] if i < len(dados_extra_o_p) else ["", ""]
+
+        if linha_tem_dados(base):
+            base_filtrada.append(base)
+            extra_filtrada.append(extra)
+        else:
+            removidas += 1
+
+    if nome_bloco:
+        print(f"Linhas vazias removidas no {nome_bloco}: {removidas}")
+    else:
+        print(f"Linhas vazias removidas: {removidas}")
+
+    return base_filtrada, extra_filtrada
+
+
 def converter_para_data(valor):
     if valor is None:
         return None
@@ -600,6 +630,7 @@ def ler_dados_origem_sem_filtro_com_extra(
 
     for linha in dados_origem:
         base_a_i, extra_o_p = selecionar_colunas_origem_com_extra(linha)
+
         dados_base_a_i.append(base_a_i)
         dados_extra_o_p.append(extra_o_p)
 
@@ -736,12 +767,24 @@ def ler_dados_csvs_bloco_3(drive_service):
 
             linhas_csv = ler_linhas_csv(texto_csv)
 
+            linhas_aproveitadas = 0
+            linhas_vazias_selecao = 0
+
             for linha in linhas_csv:
                 base_a_i, extra_o_p = selecionar_colunas_origem_com_extra(linha)
+
+                # Evita enviar linha que ficará vazia no destino.
+                if not linha_tem_dados(base_a_i):
+                    linhas_vazias_selecao += 1
+                    continue
+
                 dados_base_a_i.append(base_a_i)
                 dados_extra_o_p.append(extra_o_p)
+                linhas_aproveitadas += 1
 
-            print(f"Linhas aproveitadas do CSV {arquivo_nome}: {len(linhas_csv)}")
+            print(f"Linhas lidas do CSV {arquivo_nome}: {len(linhas_csv)}")
+            print(f"Linhas aproveitadas do CSV {arquivo_nome}: {linhas_aproveitadas}")
+            print(f"Linhas vazias ignoradas do CSV {arquivo_nome}: {linhas_vazias_selecao}")
 
         except Exception as erro:
             print(f"Erro ao processar CSV {arquivo_nome}: {erro}")
@@ -910,7 +953,15 @@ def executar_bloco_2(
         dados_base_a_i.extend(base_origem)
         dados_extra_o_p.extend(extra_origem)
 
-    print(f"Total de linhas consolidadas no Bloco 2: {len(dados_base_a_i)}")
+    print(f"Total bruto de linhas consolidadas no Bloco 2: {len(dados_base_a_i)}")
+
+    dados_base_a_i, dados_extra_o_p = remover_linhas_vazias_pareadas(
+        dados_base_a_i=dados_base_a_i,
+        dados_extra_o_p=dados_extra_o_p,
+        nome_bloco="Bloco 2"
+    )
+
+    print(f"Total final de linhas úteis no Bloco 2: {len(dados_base_a_i)}")
 
     dados_base_a_i = [
         preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BASE)
@@ -1013,7 +1064,15 @@ def executar_bloco_3(
         dados_base_a_i.extend(base_origem)
         dados_extra_o_p.extend(extra_origem)
 
-    print(f"Total de linhas consolidadas no Bloco 3: {len(dados_base_a_i)}")
+    print(f"Total bruto de linhas consolidadas no Bloco 3: {len(dados_base_a_i)}")
+
+    dados_base_a_i, dados_extra_o_p = remover_linhas_vazias_pareadas(
+        dados_base_a_i=dados_base_a_i,
+        dados_extra_o_p=dados_extra_o_p,
+        nome_bloco="Bloco 3"
+    )
+
+    print(f"Total final de linhas úteis no Bloco 3: {len(dados_base_a_i)}")
 
     dados_base_a_i = [
         preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BASE)
