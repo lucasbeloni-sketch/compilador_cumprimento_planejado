@@ -14,7 +14,7 @@ from google.oauth2.service_account import Credentials
 
 DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
 
-DESTINO_ABA = "BARREIRAS"
+DESTINO_ABA = "GERAL"
 CONFIG_ABA = "Config"
 
 CELULA_DATA_REFERENCIA = "B2"
@@ -324,7 +324,6 @@ def ler_ids_planilhas_origem(aba_config):
         if id_planilha:
             ids.append(id_planilha)
 
-    # Remove duplicados mantendo a ordem
     ids_unicos = []
     vistos = set()
 
