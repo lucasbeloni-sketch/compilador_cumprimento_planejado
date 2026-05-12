@@ -9,23 +9,18 @@ from google.oauth2.service_account import Credentials
 
 
 # ==========================
-# CONFIGURAÇÕES
+# CONFIGURAÇÕES GERAIS
 # ==========================
 
 DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
 
-DESTINO_ABA = "GERAL"
 CONFIG_ABA = "Config"
-
 CELULA_DATA_REFERENCIA = "B2"
 RANGE_IDS_ORIGEM = "B4:B"
 
-ORIGEM_ABA = "Plan_Principal"
-
-# Lê somente até BE, pois a última coluna necessária é BE.
 ORIGEM_RANGE = "B6:BE"
 
-# Serão coladas apenas 9 colunas no destino: A:I
+QTD_COLUNAS_ORIGEM_RANGE = 56
 QTD_COLUNAS_DESTINO = 9
 DESTINO_RANGE_LIMPAR = "A4:I"
 
@@ -45,7 +40,7 @@ COLUNAS_ORIGEM_SELECIONADAS = [
 
 # No destino compacto:
 # A = Data
-# E, F, G = colunas vindas de AL, AM, AN
+# E, F, G = Moeda
 COLUNA_DATA_DESTINO = 0
 
 COLUNAS_MOEDA_DESTINO = [
@@ -208,12 +203,7 @@ def eh_data_referencia(valor, data_referencia):
 
 
 def selecionar_colunas_origem(linha):
-    """
-    Seleciona apenas:
-    B, G, H, M, AL, AM, AN, AV e BE
-    do intervalo origem B:BE.
-    """
-    linha = normalizar_linha(linha, 56)
+    linha = normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
 
     return [
         linha[indice] if indice < len(linha) else ""
@@ -224,13 +214,11 @@ def selecionar_colunas_origem(linha):
 def preparar_linha_para_envio(linha):
     linha = normalizar_linha(linha, QTD_COLUNAS_DESTINO)
 
-    # Coluna A: Data
     data_valor = converter_para_data(linha[COLUNA_DATA_DESTINO])
 
     if data_valor:
         linha[COLUNA_DATA_DESTINO] = data_para_serial_google_sheets(data_valor)
 
-    # Colunas E, F e G: Moeda
     for indice in COLUNAS_MOEDA_DESTINO:
         linha[indice] = converter_moeda_para_numero(linha[indice])
 
@@ -286,7 +274,6 @@ def aplicar_formatacao_destino(planilha_destino, aba_destino):
             }
         })
 
-    # Coluna A: Data
     adicionar_formatacao_coluna(
         coluna_inicio=0,
         coluna_fim=1,
@@ -294,7 +281,6 @@ def aplicar_formatacao_destino(planilha_destino, aba_destino):
         padrao="dd/mm/yyyy"
     )
 
-    # Colunas E, F e G: Moeda
     for coluna in COLUNAS_MOEDA_DESTINO:
         adicionar_formatacao_coluna(
             coluna_inicio=coluna,
@@ -335,12 +321,12 @@ def ler_ids_planilhas_origem(aba_config):
     return ids_unicos
 
 
-def ler_dados_de_uma_origem(gc, origem_id, data_referencia):
-    print(f"Lendo origem: {origem_id}")
+def ler_dados_origem_com_filtro_data(gc, origem_id, aba_origem_nome, data_referencia):
+    print(f"Lendo origem: {origem_id} | Aba: {aba_origem_nome}")
 
     try:
         planilha_origem = gc.open_by_key(origem_id)
-        aba_origem = planilha_origem.worksheet(ORIGEM_ABA)
+        aba_origem = planilha_origem.worksheet(aba_origem_nome)
 
         dados_origem = aba_origem.get(
             ORIGEM_RANGE,
@@ -348,13 +334,11 @@ def ler_dados_de_uma_origem(gc, origem_id, data_referencia):
         )
 
         dados_origem = [
-            normalizar_linha(linha, 56)
+            normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
             for linha in dados_origem
             if linha_tem_dados(linha)
         ]
 
-        # Filtra pela coluna B da origem.
-        # Como o intervalo começa em B, a coluna B é o índice 0.
         dados_filtrados = [
             linha
             for linha in dados_origem
@@ -371,21 +355,55 @@ def ler_dados_de_uma_origem(gc, origem_id, data_referencia):
         return dados_selecionados
 
     except Exception as erro:
-        print(f"Erro ao processar a origem {origem_id}: {erro}")
+        print(f"Erro ao processar a origem {origem_id}, aba {aba_origem_nome}: {erro}")
+        print("Essa origem será ignorada e o processo seguirá para a próxima.")
+        return []
+
+
+def ler_dados_origem_sem_filtro(gc, origem_id, aba_origem_nome):
+    print(f"Lendo origem: {origem_id} | Aba: {aba_origem_nome}")
+
+    try:
+        planilha_origem = gc.open_by_key(origem_id)
+        aba_origem = planilha_origem.worksheet(aba_origem_nome)
+
+        dados_origem = aba_origem.get(
+            ORIGEM_RANGE,
+            value_render_option="FORMATTED_VALUE"
+        )
+
+        dados_origem = [
+            normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
+            for linha in dados_origem
+            if linha_tem_dados(linha)
+        ]
+
+        dados_selecionados = [
+            selecionar_colunas_origem(linha)
+            for linha in dados_origem
+        ]
+
+        print(f"Linhas encontradas nessa origem: {len(dados_selecionados)}")
+
+        return dados_selecionados
+
+    except Exception as erro:
+        print(f"Erro ao processar a origem {origem_id}, aba {aba_origem_nome}: {erro}")
         print("Essa origem será ignorada e o processo seguirá para a próxima.")
         return []
 
 
 # ==========================
-# PROCESSO PRINCIPAL
+# BLOCO 1
 # ==========================
 
-def main():
-    gc = autenticar_google_sheets()
+def executar_bloco_1(gc, planilha_destino, aba_config, ids_origem):
+    print("")
+    print("======================================")
+    print("INICIANDO BLOCO 1 - PLAN_PRINCIPAL > GERAL")
+    print("======================================")
 
-    planilha_destino = gc.open_by_key(DESTINO_ID)
-    aba_destino = planilha_destino.worksheet(DESTINO_ABA)
-    aba_config = planilha_destino.worksheet(CONFIG_ABA)
+    aba_destino = planilha_destino.worksheet("GERAL")
 
     valor_data_referencia = aba_config.acell(
         CELULA_DATA_REFERENCIA,
@@ -400,31 +418,23 @@ def main():
             f"da aba {CONFIG_ABA}. Valor encontrado: {valor_data_referencia}"
         )
 
-    print(f"Data de referência considerada: {data_referencia.strftime('%d/%m/%Y')}")
-
-    ids_origem = ler_ids_planilhas_origem(aba_config)
-
-    if not ids_origem:
-        raise Exception(
-            f"Nenhum ID de planilha de origem encontrado no intervalo {CONFIG_ABA}!{RANGE_IDS_ORIGEM}."
-        )
-
-    print(f"Quantidade de planilhas de origem encontradas: {len(ids_origem)}")
+    print(f"Data de referência considerada no Bloco 1: {data_referencia.strftime('%d/%m/%Y')}")
 
     dados_data_referencia = []
 
     for origem_id in ids_origem:
-        dados_origem = ler_dados_de_uma_origem(
+        dados_origem = ler_dados_origem_com_filtro_data(
             gc=gc,
             origem_id=origem_id,
+            aba_origem_nome="Plan_Principal",
             data_referencia=data_referencia
         )
 
         dados_data_referencia.extend(dados_origem)
 
-    print(f"Total de linhas consolidadas das origens: {len(dados_data_referencia)}")
+    print(f"Total de linhas consolidadas no Bloco 1: {len(dados_data_referencia)}")
 
-    print("Lendo dados atuais do destino...")
+    print("Lendo dados atuais da aba GERAL...")
 
     dados_destino = aba_destino.get(
         DESTINO_RANGE_LIMPAR,
@@ -437,16 +447,15 @@ def main():
         if linha_tem_dados(linha)
     ]
 
-    # Remove do destino as linhas onde a coluna A for igual à data de referência.
     dados_destino_sem_data_referencia = [
         linha
         for linha in dados_destino
         if not eh_data_referencia(linha[0], data_referencia)
     ]
 
-    print(f"Linhas antigas mantidas no destino: {len(dados_destino_sem_data_referencia)}")
+    print(f"Linhas antigas mantidas na GERAL: {len(dados_destino_sem_data_referencia)}")
     print(
-        f"Linhas removidas do destino por serem da data de referência: "
+        f"Linhas removidas da GERAL por serem da data de referência: "
         f"{len(dados_destino) - len(dados_destino_sem_data_referencia)}"
     )
 
@@ -457,11 +466,11 @@ def main():
         for linha in dados_finais
     ]
 
-    print("Limpando intervalo do destino...")
+    print("Limpando intervalo da aba GERAL...")
 
     aba_destino.batch_clear([DESTINO_RANGE_LIMPAR])
 
-    print("Aplicando formatação no destino...")
+    print("Aplicando formatação na aba GERAL...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
@@ -469,7 +478,7 @@ def main():
         ultima_linha_necessaria = 3 + len(dados_finais)
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
 
-        print("Gravando dados atualizados no destino...")
+        print("Gravando dados atualizados na aba GERAL...")
 
         escrever_em_blocos(
             aba=aba_destino,
@@ -479,9 +488,102 @@ def main():
             tamanho_bloco=1000
         )
     else:
-        print("Nenhum dado para gravar no destino.")
+        print("Nenhum dado para gravar na aba GERAL.")
 
-    print("Processo finalizado com sucesso.")
+    print("Bloco 1 finalizado com sucesso.")
+
+
+# ==========================
+# BLOCO 2
+# ==========================
+
+def executar_bloco_2(gc, planilha_destino, ids_origem):
+    print("")
+    print("======================================")
+    print("INICIANDO BLOCO 2 - REPROGRAMADAS > REPROGRAMADAS")
+    print("======================================")
+
+    aba_destino = planilha_destino.worksheet("REPROGRAMADAS")
+
+    dados_reprogramadas = []
+
+    for origem_id in ids_origem:
+        dados_origem = ler_dados_origem_sem_filtro(
+            gc=gc,
+            origem_id=origem_id,
+            aba_origem_nome="Reprogramadas"
+        )
+
+        dados_reprogramadas.extend(dados_origem)
+
+    print(f"Total de linhas consolidadas no Bloco 2: {len(dados_reprogramadas)}")
+
+    dados_finais = [
+        preparar_linha_para_envio(linha)
+        for linha in dados_reprogramadas
+    ]
+
+    print("Limpando intervalo da aba REPROGRAMADAS...")
+
+    aba_destino.batch_clear([DESTINO_RANGE_LIMPAR])
+
+    print("Aplicando formatação na aba REPROGRAMADAS...")
+
+    aplicar_formatacao_destino(planilha_destino, aba_destino)
+
+    if dados_finais:
+        ultima_linha_necessaria = 3 + len(dados_finais)
+        garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
+
+        print("Gravando dados atualizados na aba REPROGRAMADAS...")
+
+        escrever_em_blocos(
+            aba=aba_destino,
+            dados=dados_finais,
+            linha_inicial=4,
+            coluna_inicial="A",
+            tamanho_bloco=1000
+        )
+    else:
+        print("Nenhum dado para gravar na aba REPROGRAMADAS.")
+
+    print("Bloco 2 finalizado com sucesso.")
+
+
+# ==========================
+# PROCESSO PRINCIPAL
+# ==========================
+
+def main():
+    gc = autenticar_google_sheets()
+
+    planilha_destino = gc.open_by_key(DESTINO_ID)
+    aba_config = planilha_destino.worksheet(CONFIG_ABA)
+
+    ids_origem = ler_ids_planilhas_origem(aba_config)
+
+    if not ids_origem:
+        raise Exception(
+            f"Nenhum ID de planilha de origem encontrado no intervalo {CONFIG_ABA}!{RANGE_IDS_ORIGEM}."
+        )
+
+    print(f"Quantidade de planilhas de origem encontradas: {len(ids_origem)}")
+
+    executar_bloco_1(
+        gc=gc,
+        planilha_destino=planilha_destino,
+        aba_config=aba_config,
+        ids_origem=ids_origem
+    )
+
+    executar_bloco_2(
+        gc=gc,
+        planilha_destino=planilha_destino,
+        ids_origem=ids_origem
+    )
+
+    print("")
+    print("Processo completo finalizado com sucesso.")
 
 
 if __name__ == "__main__":
