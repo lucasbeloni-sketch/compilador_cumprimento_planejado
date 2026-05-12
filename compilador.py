@@ -23,15 +23,15 @@ ORIGEM_RANGE = "B6:BE"
 QTD_COLUNAS_ORIGEM_RANGE = 56
 
 QTD_COLUNAS_DESTINO_BLOCO_1 = 9
-QTD_COLUNAS_DESTINO_BLOCO_2_BASE = 9
-QTD_COLUNAS_DESTINO_BLOCO_2_EXTRA = 2
+QTD_COLUNAS_DESTINO_BASE = 9
+QTD_COLUNAS_DESTINO_EXTRA = 2
 
 DESTINO_RANGE_LIMPAR_BLOCO_1 = "A4:I"
 
-# Bloco 2:
+# Blocos 2 e 3:
 # NÃO limpar J:N, pois possuem fórmulas.
-DESTINO_RANGE_LIMPAR_BLOCO_2_BASE = "A4:I"
-DESTINO_RANGE_LIMPAR_BLOCO_2_EXTRA = "O4:P"
+DESTINO_RANGE_LIMPAR_BASE = "A4:I"
+DESTINO_RANGE_LIMPAR_EXTRA = "O4:P"
 
 # Índices relativos ao intervalo B:BE
 # B=0, C=1, D=2...
@@ -214,7 +214,7 @@ def eh_data_referencia(valor, data_referencia):
     return data_valor == data_referencia
 
 
-def selecionar_colunas_origem_bloco_1(linha):
+def selecionar_colunas_origem_base(linha):
     linha = normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
 
     return [
@@ -223,10 +223,10 @@ def selecionar_colunas_origem_bloco_1(linha):
     ]
 
 
-def selecionar_colunas_origem_bloco_2(linha):
+def selecionar_colunas_origem_com_extra(linha):
     """
-    Bloco 2:
-    A:I recebe as mesmas colunas do Bloco 1.
+    Layout destino:
+    A:I recebe as mesmas colunas base.
     O recebe AU.
     P recebe AW.
 
@@ -385,7 +385,7 @@ def ler_dados_origem_com_filtro_data(gc, origem_id, aba_origem_nome, data_refere
         ]
 
         dados_selecionados = [
-            selecionar_colunas_origem_bloco_1(linha)
+            selecionar_colunas_origem_base(linha)
             for linha in dados_filtrados
         ]
 
@@ -399,7 +399,7 @@ def ler_dados_origem_com_filtro_data(gc, origem_id, aba_origem_nome, data_refere
         return []
 
 
-def ler_dados_origem_sem_filtro_bloco_2(gc, origem_id, aba_origem_nome):
+def ler_dados_origem_sem_filtro_com_extra(gc, origem_id, aba_origem_nome):
     print(f"Lendo origem: {origem_id} | Aba: {aba_origem_nome}")
 
     try:
@@ -421,7 +421,7 @@ def ler_dados_origem_sem_filtro_bloco_2(gc, origem_id, aba_origem_nome):
         dados_extra_o_p = []
 
         for linha in dados_origem:
-            base_a_i, extra_o_p = selecionar_colunas_origem_bloco_2(linha)
+            base_a_i, extra_o_p = selecionar_colunas_origem_com_extra(linha)
             dados_base_a_i.append(base_a_i)
             dados_extra_o_p.append(extra_o_p)
 
@@ -551,7 +551,7 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
     dados_extra_o_p = []
 
     for origem_id in ids_origem:
-        base_origem, extra_origem = ler_dados_origem_sem_filtro_bloco_2(
+        base_origem, extra_origem = ler_dados_origem_sem_filtro_com_extra(
             gc=gc,
             origem_id=origem_id,
             aba_origem_nome="Reprogramadas"
@@ -563,12 +563,12 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
     print(f"Total de linhas consolidadas no Bloco 2: {len(dados_base_a_i)}")
 
     dados_base_a_i = [
-        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BLOCO_2_BASE)
+        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BASE)
         for linha in dados_base_a_i
     ]
 
     dados_extra_o_p = [
-        normalizar_linha(linha, QTD_COLUNAS_DESTINO_BLOCO_2_EXTRA)
+        normalizar_linha(linha, QTD_COLUNAS_DESTINO_EXTRA)
         for linha in dados_extra_o_p
     ]
 
@@ -576,8 +576,8 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
     print("As colunas J:N serão preservadas.")
 
     aba_destino.batch_clear([
-        DESTINO_RANGE_LIMPAR_BLOCO_2_BASE,
-        DESTINO_RANGE_LIMPAR_BLOCO_2_EXTRA
+        DESTINO_RANGE_LIMPAR_BASE,
+        DESTINO_RANGE_LIMPAR_EXTRA
     ])
 
     print("Aplicando formatação na aba REPROGRAMADAS...")
@@ -614,6 +614,84 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
 
 
 # ==========================
+# BLOCO 3
+# ==========================
+
+def executar_bloco_3(gc, planilha_destino, ids_origem):
+    print("")
+    print("======================================")
+    print("INICIANDO BLOCO 3 - PLAN_PRINCIPAL > PLAN_PRINCIPAL")
+    print("======================================")
+
+    aba_destino = planilha_destino.worksheet("PLAN_PRINCIPAL")
+
+    dados_base_a_i = []
+    dados_extra_o_p = []
+
+    for origem_id in ids_origem:
+        base_origem, extra_origem = ler_dados_origem_sem_filtro_com_extra(
+            gc=gc,
+            origem_id=origem_id,
+            aba_origem_nome="Plan_Principal"
+        )
+
+        dados_base_a_i.extend(base_origem)
+        dados_extra_o_p.extend(extra_origem)
+
+    print(f"Total de linhas consolidadas no Bloco 3: {len(dados_base_a_i)}")
+
+    dados_base_a_i = [
+        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BASE)
+        for linha in dados_base_a_i
+    ]
+
+    dados_extra_o_p = [
+        normalizar_linha(linha, QTD_COLUNAS_DESTINO_EXTRA)
+        for linha in dados_extra_o_p
+    ]
+
+    print("Limpando somente A:I e O:P da aba PLAN_PRINCIPAL...")
+    print("As colunas J:N serão preservadas.")
+
+    aba_destino.batch_clear([
+        DESTINO_RANGE_LIMPAR_BASE,
+        DESTINO_RANGE_LIMPAR_EXTRA
+    ])
+
+    print("Aplicando formatação na aba PLAN_PRINCIPAL...")
+
+    aplicar_formatacao_destino(planilha_destino, aba_destino)
+
+    if dados_base_a_i:
+        ultima_linha_necessaria = 3 + len(dados_base_a_i)
+        garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
+
+        print("Gravando dados A:I na aba PLAN_PRINCIPAL...")
+
+        escrever_em_blocos(
+            aba=aba_destino,
+            dados=dados_base_a_i,
+            linha_inicial=4,
+            coluna_inicial="A",
+            tamanho_bloco=1000
+        )
+
+        print("Gravando dados O:P na aba PLAN_PRINCIPAL...")
+
+        escrever_em_blocos(
+            aba=aba_destino,
+            dados=dados_extra_o_p,
+            linha_inicial=4,
+            coluna_inicial="O",
+            tamanho_bloco=1000
+        )
+    else:
+        print("Nenhum dado para gravar na aba PLAN_PRINCIPAL.")
+
+    print("Bloco 3 finalizado com sucesso.")
+
+
+# ==========================
 # PROCESSO PRINCIPAL
 # ==========================
 
@@ -640,6 +718,12 @@ def main():
     )
 
     executar_bloco_2(
+        gc=gc,
+        planilha_destino=planilha_destino,
+        ids_origem=ids_origem
+    )
+
+    executar_bloco_3(
         gc=gc,
         planilha_destino=planilha_destino,
         ids_origem=ids_origem
