@@ -21,8 +21,12 @@ RANGE_IDS_ORIGEM = "B4:B"
 ORIGEM_RANGE = "B6:BE"
 
 QTD_COLUNAS_ORIGEM_RANGE = 56
-QTD_COLUNAS_DESTINO = 9
-DESTINO_RANGE_LIMPAR = "A4:I"
+
+QTD_COLUNAS_DESTINO_BLOCO_1 = 9
+QTD_COLUNAS_DESTINO_BLOCO_2 = 16
+
+DESTINO_RANGE_LIMPAR_BLOCO_1 = "A4:I"
+DESTINO_RANGE_LIMPAR_BLOCO_2 = "A4:P"
 
 # Índices relativos ao intervalo B:BE
 # B=0, C=1, D=2...
@@ -38,7 +42,10 @@ COLUNAS_ORIGEM_SELECIONADAS = [
     55,  # BE
 ]
 
-# No destino compacto:
+COLUNA_ORIGEM_AU = 45  # AU
+COLUNA_ORIGEM_AW = 47  # AW
+
+# No destino:
 # A = Data
 # E, F, G = Moeda
 COLUNA_DATA_DESTINO = 0
@@ -202,7 +209,7 @@ def eh_data_referencia(valor, data_referencia):
     return data_valor == data_referencia
 
 
-def selecionar_colunas_origem(linha):
+def selecionar_colunas_origem_bloco_1(linha):
     linha = normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
 
     return [
@@ -211,8 +218,43 @@ def selecionar_colunas_origem(linha):
     ]
 
 
-def preparar_linha_para_envio(linha):
-    linha = normalizar_linha(linha, QTD_COLUNAS_DESTINO)
+def selecionar_colunas_origem_bloco_2(linha):
+    """
+    Bloco 2:
+    A:I recebe as mesmas colunas do Bloco 1.
+    O recebe AU.
+    P recebe AW.
+
+    Layout destino:
+    A = B
+    B = G
+    C = H
+    D = M
+    E = AL
+    F = AM
+    G = AN
+    H = AV
+    I = BE
+    J:N = vazio
+    O = AU
+    P = AW
+    """
+
+    linha = normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
+
+    base = [
+        linha[indice] if indice < len(linha) else ""
+        for indice in COLUNAS_ORIGEM_SELECIONADAS
+    ]
+
+    col_au = linha[COLUNA_ORIGEM_AU] if COLUNA_ORIGEM_AU < len(linha) else ""
+    col_aw = linha[COLUNA_ORIGEM_AW] if COLUNA_ORIGEM_AW < len(linha) else ""
+
+    return base + ["", "", "", "", ""] + [col_au, col_aw]
+
+
+def preparar_linha_para_envio(linha, qtd_colunas_destino):
+    linha = normalizar_linha(linha, qtd_colunas_destino)
 
     data_valor = converter_para_data(linha[COLUNA_DATA_DESTINO])
 
@@ -220,7 +262,8 @@ def preparar_linha_para_envio(linha):
         linha[COLUNA_DATA_DESTINO] = data_para_serial_google_sheets(data_valor)
 
     for indice in COLUNAS_MOEDA_DESTINO:
-        linha[indice] = converter_moeda_para_numero(linha[indice])
+        if indice < len(linha):
+            linha[indice] = converter_moeda_para_numero(linha[indice])
 
     return linha
 
@@ -346,7 +389,7 @@ def ler_dados_origem_com_filtro_data(gc, origem_id, aba_origem_nome, data_refere
         ]
 
         dados_selecionados = [
-            selecionar_colunas_origem(linha)
+            selecionar_colunas_origem_bloco_1(linha)
             for linha in dados_filtrados
         ]
 
@@ -360,7 +403,7 @@ def ler_dados_origem_com_filtro_data(gc, origem_id, aba_origem_nome, data_refere
         return []
 
 
-def ler_dados_origem_sem_filtro(gc, origem_id, aba_origem_nome):
+def ler_dados_origem_sem_filtro_bloco_2(gc, origem_id, aba_origem_nome):
     print(f"Lendo origem: {origem_id} | Aba: {aba_origem_nome}")
 
     try:
@@ -379,7 +422,7 @@ def ler_dados_origem_sem_filtro(gc, origem_id, aba_origem_nome):
         ]
 
         dados_selecionados = [
-            selecionar_colunas_origem(linha)
+            selecionar_colunas_origem_bloco_2(linha)
             for linha in dados_origem
         ]
 
@@ -437,12 +480,12 @@ def executar_bloco_1(gc, planilha_destino, aba_config, ids_origem):
     print("Lendo dados atuais da aba GERAL...")
 
     dados_destino = aba_destino.get(
-        DESTINO_RANGE_LIMPAR,
+        DESTINO_RANGE_LIMPAR_BLOCO_1,
         value_render_option="FORMATTED_VALUE"
     )
 
     dados_destino = [
-        normalizar_linha(linha, QTD_COLUNAS_DESTINO)
+        normalizar_linha(linha, QTD_COLUNAS_DESTINO_BLOCO_1)
         for linha in dados_destino
         if linha_tem_dados(linha)
     ]
@@ -462,13 +505,13 @@ def executar_bloco_1(gc, planilha_destino, aba_config, ids_origem):
     dados_finais = dados_data_referencia + dados_destino_sem_data_referencia
 
     dados_finais = [
-        preparar_linha_para_envio(linha)
+        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BLOCO_1)
         for linha in dados_finais
     ]
 
     print("Limpando intervalo da aba GERAL...")
 
-    aba_destino.batch_clear([DESTINO_RANGE_LIMPAR])
+    aba_destino.batch_clear([DESTINO_RANGE_LIMPAR_BLOCO_1])
 
     print("Aplicando formatação na aba GERAL...")
 
@@ -508,7 +551,7 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
     dados_reprogramadas = []
 
     for origem_id in ids_origem:
-        dados_origem = ler_dados_origem_sem_filtro(
+        dados_origem = ler_dados_origem_sem_filtro_bloco_2(
             gc=gc,
             origem_id=origem_id,
             aba_origem_nome="Reprogramadas"
@@ -519,13 +562,13 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
     print(f"Total de linhas consolidadas no Bloco 2: {len(dados_reprogramadas)}")
 
     dados_finais = [
-        preparar_linha_para_envio(linha)
+        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BLOCO_2)
         for linha in dados_reprogramadas
     ]
 
     print("Limpando intervalo da aba REPROGRAMADAS...")
 
-    aba_destino.batch_clear([DESTINO_RANGE_LIMPAR])
+    aba_destino.batch_clear([DESTINO_RANGE_LIMPAR_BLOCO_2])
 
     print("Aplicando formatação na aba REPROGRAMADAS...")
 
