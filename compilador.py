@@ -4,11 +4,15 @@ import base64
 import re
 import csv
 import io
+import time
+import random
 from datetime import datetime, date, timedelta
 
 import gspread
+from gspread.exceptions import APIError, WorksheetNotFound
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 
 # ==========================
@@ -38,10 +42,21 @@ DESTINO_RANGE_LIMPAR_BLOCO_1 = "A4:I"
 DESTINO_RANGE_LIMPAR_BASE = "A4:I"
 DESTINO_RANGE_LIMPAR_EXTRA = "O4:P"
 
+# Escreve blocos maiores para reduzir requisições na API.
+TAMANHO_BLOCO_ESCRITA = 10000
+
+# Pequenas pausas para reduzir risco de 429.
+PAUSA_APOS_LEITURA = 1.5
+PAUSA_APOS_ESCRITA = 2.5
+
+# Retry para erro de quota / instabilidade.
+MAX_TENTATIVAS_API = 7
+ESPERA_INICIAL_429 = 20
+ESPERA_MAXIMA_429 = 90
+
 # Índices relativos ao intervalo base.
 # Para Sheets: B:BE
 # Para CSV: A:BD
-# A lógica é a mesma, só muda a letra inicial da fonte.
 COLUNAS_ORIGEM_SELECIONADAS = [
     0,   # Sheets: B  | CSV: A
     5,   # Sheets: G  | CSV: F
@@ -67,6 +82,74 @@ COLUNAS_MOEDA_DESTINO = [
     5,  # F
     6,  # G
 ]
+
+
+# ==========================
+# RETRY / CONTROLE DE COTA
+# ==========================
+
+def erro_temporario_api(erro):
+    texto = str(erro).lower()
+
+    status = None
+
+    if isinstance(erro, APIError):
+        response = getattr(erro, "response", None)
+        status = getattr(response, "status_code", None)
+
+    if isinstance(erro, HttpError):
+        status = getattr(erro.resp, "status", None)
+
+    if status in [429, 500, 502, 503, 504]:
+        return True
+
+    termos = [
+        "quota exceeded",
+        "read requests per minute",
+        "write requests per minute",
+        "rate limit",
+        "backend error",
+        "internal error",
+        "service unavailable",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+    ]
+
+    return any(termo in texto for termo in termos)
+
+
+def executar_com_retry(funcao, descricao="operação Google API"):
+    ultimo_erro = None
+
+    for tentativa in range(1, MAX_TENTATIVAS_API + 1):
+        try:
+            return funcao()
+
+        except Exception as erro:
+            ultimo_erro = erro
+
+            if not erro_temporario_api(erro):
+                raise
+
+            espera = min(
+                ESPERA_MAXIMA_429,
+                ESPERA_INICIAL_429 * (2 ** (tentativa - 1))
+            )
+
+            espera += random.uniform(1, 5)
+
+            print(
+                f"Aviso: erro temporário/API quota em '{descricao}'. "
+                f"Tentativa {tentativa}/{MAX_TENTATIVAS_API}. "
+                f"Aguardando {espera:.1f}s antes de tentar novamente."
+            )
+
+            time.sleep(espera)
+
+    raise ultimo_erro
 
 
 # ==========================
@@ -241,16 +324,6 @@ def selecionar_colunas_origem_base(linha):
 
 
 def selecionar_colunas_origem_com_extra(linha):
-    """
-    Layout destino:
-    A:I recebe as colunas base.
-    O recebe coluna extra 1.
-    P recebe coluna extra 2.
-
-    Importante:
-    J:N não serão limpas nem alteradas, pois possuem fórmulas.
-    """
-
     linha = normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
 
     base_a_i = [
@@ -285,23 +358,44 @@ def garantir_linhas_suficientes(aba, ultima_linha_necessaria):
     linhas_atuais = aba.row_count
 
     if ultima_linha_necessaria > linhas_atuais:
-        aba.add_rows(ultima_linha_necessaria - linhas_atuais)
+        executar_com_retry(
+            lambda: aba.add_rows(ultima_linha_necessaria - linhas_atuais),
+            descricao=f"adicionar linhas na aba {aba.title}"
+        )
 
 
-def escrever_em_blocos(aba, dados, linha_inicial=4, coluna_inicial="A", tamanho_bloco=1000):
+def escrever_em_blocos(
+    aba,
+    dados,
+    linha_inicial=4,
+    coluna_inicial="A",
+    tamanho_bloco=TAMANHO_BLOCO_ESCRITA
+):
     if not dados:
         return
 
-    for i in range(0, len(dados), tamanho_bloco):
+    total = len(dados)
+
+    for i in range(0, total, tamanho_bloco):
         bloco = dados[i:i + tamanho_bloco]
         linha_destino = linha_inicial + i
         celula_inicio = f"{coluna_inicial}{linha_destino}"
 
-        aba.update(
-            values=bloco,
-            range_name=celula_inicio,
-            value_input_option="USER_ENTERED"
+        print(
+            f"Escrevendo bloco em {aba.title}!{celula_inicio} "
+            f"({i + 1} até {min(i + tamanho_bloco, total)} de {total})"
         )
+
+        executar_com_retry(
+            lambda bloco=bloco, celula_inicio=celula_inicio: aba.update(
+                values=bloco,
+                range_name=celula_inicio,
+                value_input_option="USER_ENTERED"
+            ),
+            descricao=f"escrita em {aba.title}!{celula_inicio}"
+        )
+
+        time.sleep(PAUSA_APOS_ESCRITA)
 
 
 def aplicar_formatacao_destino(planilha_destino, aba_destino):
@@ -346,13 +440,86 @@ def aplicar_formatacao_destino(planilha_destino, aba_destino):
         )
 
     if requests:
-        planilha_destino.batch_update({"requests": requests})
+        executar_com_retry(
+            lambda: planilha_destino.batch_update({"requests": requests}),
+            descricao=f"aplicar formatação na aba {aba_destino.title}"
+        )
+
+
+def obter_planilha_origem(gc, origem_id, cache_planilhas):
+    if origem_id in cache_planilhas:
+        return cache_planilhas[origem_id]
+
+    planilha = executar_com_retry(
+        lambda: gc.open_by_key(origem_id),
+        descricao=f"abrir planilha origem {origem_id}"
+    )
+
+    cache_planilhas[origem_id] = planilha
+
+    return planilha
+
+
+def ler_dados_google_sheet(gc, origem_id, aba_origem_nome, cache_planilhas, cache_dados):
+    chave_cache = (origem_id, aba_origem_nome)
+
+    if chave_cache in cache_dados:
+        print(f"Usando cache Google Sheets: {origem_id} | Aba: {aba_origem_nome}")
+        return cache_dados[chave_cache]
+
+    print(f"Lendo origem Google Sheets: {origem_id} | Aba: {aba_origem_nome}")
+
+    try:
+        planilha_origem = obter_planilha_origem(
+            gc=gc,
+            origem_id=origem_id,
+            cache_planilhas=cache_planilhas
+        )
+
+        aba_origem = executar_com_retry(
+            lambda: planilha_origem.worksheet(aba_origem_nome),
+            descricao=f"abrir aba {aba_origem_nome} na origem {origem_id}"
+        )
+
+        dados_origem = executar_com_retry(
+            lambda: aba_origem.get(
+                ORIGEM_RANGE,
+                value_render_option="FORMATTED_VALUE"
+            ),
+            descricao=f"ler {aba_origem_nome}!{ORIGEM_RANGE} da origem {origem_id}"
+        )
+
+        dados_origem = [
+            normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
+            for linha in dados_origem
+            if linha_tem_dados(linha)
+        ]
+
+        cache_dados[chave_cache] = dados_origem
+
+        time.sleep(PAUSA_APOS_LEITURA)
+
+        return dados_origem
+
+    except WorksheetNotFound:
+        print(f"Aba não encontrada na origem {origem_id}: {aba_origem_nome}")
+        cache_dados[chave_cache] = []
+        return []
+
+    except Exception as erro:
+        print(f"Erro ao processar a origem {origem_id}, aba {aba_origem_nome}: {erro}")
+        print("Essa origem será ignorada e o processo seguirá para a próxima.")
+        cache_dados[chave_cache] = []
+        return []
 
 
 def ler_ids_planilhas_origem(aba_config):
-    valores = aba_config.get(
-        RANGE_IDS_ORIGEM,
-        value_render_option="FORMATTED_VALUE"
+    valores = executar_com_retry(
+        lambda: aba_config.get(
+            RANGE_IDS_ORIGEM,
+            value_render_option="FORMATTED_VALUE"
+        ),
+        descricao=f"ler IDs em {CONFIG_ABA}!{RANGE_IDS_ORIGEM}"
     )
 
     ids = []
@@ -381,79 +548,64 @@ def ler_ids_planilhas_origem(aba_config):
 # LEITURA GOOGLE SHEETS
 # ==========================
 
-def ler_dados_origem_com_filtro_data(gc, origem_id, aba_origem_nome, data_referencia):
-    print(f"Lendo origem Google Sheets: {origem_id} | Aba: {aba_origem_nome}")
+def ler_dados_origem_com_filtro_data(
+    gc,
+    origem_id,
+    aba_origem_nome,
+    data_referencia,
+    cache_planilhas,
+    cache_dados
+):
+    dados_origem = ler_dados_google_sheet(
+        gc=gc,
+        origem_id=origem_id,
+        aba_origem_nome=aba_origem_nome,
+        cache_planilhas=cache_planilhas,
+        cache_dados=cache_dados
+    )
 
-    try:
-        planilha_origem = gc.open_by_key(origem_id)
-        aba_origem = planilha_origem.worksheet(aba_origem_nome)
+    dados_filtrados = [
+        linha
+        for linha in dados_origem
+        if eh_data_referencia(linha[0], data_referencia)
+    ]
 
-        dados_origem = aba_origem.get(
-            ORIGEM_RANGE,
-            value_render_option="FORMATTED_VALUE"
-        )
+    dados_selecionados = [
+        selecionar_colunas_origem_base(linha)
+        for linha in dados_filtrados
+    ]
 
-        dados_origem = [
-            normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
-            for linha in dados_origem
-            if linha_tem_dados(linha)
-        ]
+    print(f"Linhas encontradas nessa origem: {len(dados_selecionados)}")
 
-        dados_filtrados = [
-            linha
-            for linha in dados_origem
-            if eh_data_referencia(linha[0], data_referencia)
-        ]
-
-        dados_selecionados = [
-            selecionar_colunas_origem_base(linha)
-            for linha in dados_filtrados
-        ]
-
-        print(f"Linhas encontradas nessa origem: {len(dados_selecionados)}")
-
-        return dados_selecionados
-
-    except Exception as erro:
-        print(f"Erro ao processar a origem {origem_id}, aba {aba_origem_nome}: {erro}")
-        print("Essa origem será ignorada e o processo seguirá para a próxima.")
-        return []
+    return dados_selecionados
 
 
-def ler_dados_origem_sem_filtro_com_extra(gc, origem_id, aba_origem_nome):
-    print(f"Lendo origem Google Sheets: {origem_id} | Aba: {aba_origem_nome}")
+def ler_dados_origem_sem_filtro_com_extra(
+    gc,
+    origem_id,
+    aba_origem_nome,
+    cache_planilhas,
+    cache_dados
+):
+    dados_origem = ler_dados_google_sheet(
+        gc=gc,
+        origem_id=origem_id,
+        aba_origem_nome=aba_origem_nome,
+        cache_planilhas=cache_planilhas,
+        cache_dados=cache_dados
+    )
 
-    try:
-        planilha_origem = gc.open_by_key(origem_id)
-        aba_origem = planilha_origem.worksheet(aba_origem_nome)
+    dados_base_a_i = []
+    dados_extra_o_p = []
 
-        dados_origem = aba_origem.get(
-            ORIGEM_RANGE,
-            value_render_option="FORMATTED_VALUE"
-        )
+    for linha in dados_origem:
+        base_a_i, extra_o_p = selecionar_colunas_origem_com_extra(linha)
+        dados_base_a_i.append(base_a_i)
+        dados_extra_o_p.append(extra_o_p)
 
-        dados_origem = [
-            normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
-            for linha in dados_origem
-            if linha_tem_dados(linha)
-        ]
+    print(f"Linhas encontradas nessa origem: {len(dados_base_a_i)}")
 
-        dados_base_a_i = []
-        dados_extra_o_p = []
-
-        for linha in dados_origem:
-            base_a_i, extra_o_p = selecionar_colunas_origem_com_extra(linha)
-            dados_base_a_i.append(base_a_i)
-            dados_extra_o_p.append(extra_o_p)
-
-        print(f"Linhas encontradas nessa origem: {len(dados_base_a_i)}")
-
-        return dados_base_a_i, dados_extra_o_p
-
-    except Exception as erro:
-        print(f"Erro ao processar a origem {origem_id}, aba {aba_origem_nome}: {erro}")
-        print("Essa origem será ignorada e o processo seguirá para a próxima.")
-        return [], []
+    return dados_base_a_i, dados_extra_o_p
 
 
 # ==========================
@@ -473,15 +625,18 @@ def listar_arquivos_csv_drive(drive_service, pasta_id):
     )
 
     while True:
-        resposta = drive_service.files().list(
-            q=query,
-            spaces="drive",
-            fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
-            pageToken=page_token,
-            pageSize=1000,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True
-        ).execute()
+        resposta = executar_com_retry(
+            lambda page_token=page_token: drive_service.files().list(
+                q=query,
+                spaces="drive",
+                fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
+                pageToken=page_token,
+                pageSize=1000,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute(),
+            descricao="listar CSVs no Google Drive"
+        )
 
         arquivos.extend(resposta.get("files", []))
         page_token = resposta.get("nextPageToken")
@@ -497,10 +652,13 @@ def listar_arquivos_csv_drive(drive_service, pasta_id):
 
 
 def baixar_csv_drive(drive_service, arquivo_id):
-    conteudo = drive_service.files().get_media(
-        fileId=arquivo_id,
-        supportsAllDrives=True
-    ).execute()
+    conteudo = executar_com_retry(
+        lambda: drive_service.files().get_media(
+            fileId=arquivo_id,
+            supportsAllDrives=True
+        ).execute(),
+        descricao=f"baixar CSV {arquivo_id}"
+    )
 
     if isinstance(conteudo, str):
         return conteudo
@@ -598,18 +756,31 @@ def ler_dados_csvs_bloco_3(drive_service):
 # BLOCO 1
 # ==========================
 
-def executar_bloco_1(gc, planilha_destino, aba_config, ids_origem):
+def executar_bloco_1(
+    gc,
+    planilha_destino,
+    aba_config,
+    ids_origem,
+    cache_planilhas,
+    cache_dados
+):
     print("")
     print("======================================")
     print("INICIANDO BLOCO 1 - PLAN_PRINCIPAL > GERAL")
     print("======================================")
 
-    aba_destino = planilha_destino.worksheet("GERAL")
+    aba_destino = executar_com_retry(
+        lambda: planilha_destino.worksheet("GERAL"),
+        descricao="abrir aba GERAL"
+    )
 
-    valor_data_referencia = aba_config.acell(
-        CELULA_DATA_REFERENCIA,
-        value_render_option="FORMATTED_VALUE"
-    ).value
+    valor_data_referencia = executar_com_retry(
+        lambda: aba_config.acell(
+            CELULA_DATA_REFERENCIA,
+            value_render_option="FORMATTED_VALUE"
+        ).value,
+        descricao=f"ler data em {CONFIG_ABA}!{CELULA_DATA_REFERENCIA}"
+    )
 
     data_referencia = converter_para_data(valor_data_referencia)
 
@@ -628,7 +799,9 @@ def executar_bloco_1(gc, planilha_destino, aba_config, ids_origem):
             gc=gc,
             origem_id=origem_id,
             aba_origem_nome="Plan_Principal",
-            data_referencia=data_referencia
+            data_referencia=data_referencia,
+            cache_planilhas=cache_planilhas,
+            cache_dados=cache_dados
         )
 
         dados_data_referencia.extend(dados_origem)
@@ -637,10 +810,15 @@ def executar_bloco_1(gc, planilha_destino, aba_config, ids_origem):
 
     print("Lendo dados atuais da aba GERAL...")
 
-    dados_destino = aba_destino.get(
-        DESTINO_RANGE_LIMPAR_BLOCO_1,
-        value_render_option="FORMATTED_VALUE"
+    dados_destino = executar_com_retry(
+        lambda: aba_destino.get(
+            DESTINO_RANGE_LIMPAR_BLOCO_1,
+            value_render_option="FORMATTED_VALUE"
+        ),
+        descricao=f"ler destino GERAL!{DESTINO_RANGE_LIMPAR_BLOCO_1}"
     )
+
+    time.sleep(PAUSA_APOS_LEITURA)
 
     dados_destino = [
         normalizar_linha(linha, QTD_COLUNAS_DESTINO_BLOCO_1)
@@ -669,7 +847,10 @@ def executar_bloco_1(gc, planilha_destino, aba_config, ids_origem):
 
     print("Limpando intervalo da aba GERAL...")
 
-    aba_destino.batch_clear([DESTINO_RANGE_LIMPAR_BLOCO_1])
+    executar_com_retry(
+        lambda: aba_destino.batch_clear([DESTINO_RANGE_LIMPAR_BLOCO_1]),
+        descricao=f"limpar GERAL!{DESTINO_RANGE_LIMPAR_BLOCO_1}"
+    )
 
     print("Aplicando formatação na aba GERAL...")
 
@@ -685,8 +866,7 @@ def executar_bloco_1(gc, planilha_destino, aba_config, ids_origem):
             aba=aba_destino,
             dados=dados_finais,
             linha_inicial=4,
-            coluna_inicial="A",
-            tamanho_bloco=1000
+            coluna_inicial="A"
         )
     else:
         print("Nenhum dado para gravar na aba GERAL.")
@@ -698,13 +878,22 @@ def executar_bloco_1(gc, planilha_destino, aba_config, ids_origem):
 # BLOCO 2
 # ==========================
 
-def executar_bloco_2(gc, planilha_destino, ids_origem):
+def executar_bloco_2(
+    gc,
+    planilha_destino,
+    ids_origem,
+    cache_planilhas,
+    cache_dados
+):
     print("")
     print("======================================")
     print("INICIANDO BLOCO 2 - REPROGRAMADAS > REPROGRAMADAS")
     print("======================================")
 
-    aba_destino = planilha_destino.worksheet("REPROGRAMADAS")
+    aba_destino = executar_com_retry(
+        lambda: planilha_destino.worksheet("REPROGRAMADAS"),
+        descricao="abrir aba REPROGRAMADAS"
+    )
 
     dados_base_a_i = []
     dados_extra_o_p = []
@@ -713,7 +902,9 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
         base_origem, extra_origem = ler_dados_origem_sem_filtro_com_extra(
             gc=gc,
             origem_id=origem_id,
-            aba_origem_nome="Reprogramadas"
+            aba_origem_nome="Reprogramadas",
+            cache_planilhas=cache_planilhas,
+            cache_dados=cache_dados
         )
 
         dados_base_a_i.extend(base_origem)
@@ -734,10 +925,13 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
     print("Limpando somente A:I e O:P da aba REPROGRAMADAS...")
     print("As colunas J:N serão preservadas.")
 
-    aba_destino.batch_clear([
-        DESTINO_RANGE_LIMPAR_BASE,
-        DESTINO_RANGE_LIMPAR_EXTRA
-    ])
+    executar_com_retry(
+        lambda: aba_destino.batch_clear([
+            DESTINO_RANGE_LIMPAR_BASE,
+            DESTINO_RANGE_LIMPAR_EXTRA
+        ]),
+        descricao="limpar REPROGRAMADAS A:I e O:P"
+    )
 
     print("Aplicando formatação na aba REPROGRAMADAS...")
 
@@ -753,8 +947,7 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
             aba=aba_destino,
             dados=dados_base_a_i,
             linha_inicial=4,
-            coluna_inicial="A",
-            tamanho_bloco=1000
+            coluna_inicial="A"
         )
 
         print("Gravando dados O:P na aba REPROGRAMADAS...")
@@ -763,8 +956,7 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
             aba=aba_destino,
             dados=dados_extra_o_p,
             linha_inicial=4,
-            coluna_inicial="O",
-            tamanho_bloco=1000
+            coluna_inicial="O"
         )
     else:
         print("Nenhum dado para gravar na aba REPROGRAMADAS.")
@@ -776,13 +968,23 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
 # BLOCO 3
 # ==========================
 
-def executar_bloco_3(gc, drive_service, planilha_destino, ids_origem):
+def executar_bloco_3(
+    gc,
+    drive_service,
+    planilha_destino,
+    ids_origem,
+    cache_planilhas,
+    cache_dados
+):
     print("")
     print("======================================")
     print("INICIANDO BLOCO 3 - CSVs + PLAN_PRINCIPAL > PLAN_PRINCIPAL")
     print("======================================")
 
-    aba_destino = planilha_destino.worksheet("PLAN_PRINCIPAL")
+    aba_destino = executar_com_retry(
+        lambda: planilha_destino.worksheet("PLAN_PRINCIPAL"),
+        descricao="abrir aba PLAN_PRINCIPAL"
+    )
 
     dados_base_a_i = []
     dados_extra_o_p = []
@@ -803,7 +1005,9 @@ def executar_bloco_3(gc, drive_service, planilha_destino, ids_origem):
         base_origem, extra_origem = ler_dados_origem_sem_filtro_com_extra(
             gc=gc,
             origem_id=origem_id,
-            aba_origem_nome="Plan_Principal"
+            aba_origem_nome="Plan_Principal",
+            cache_planilhas=cache_planilhas,
+            cache_dados=cache_dados
         )
 
         dados_base_a_i.extend(base_origem)
@@ -824,10 +1028,13 @@ def executar_bloco_3(gc, drive_service, planilha_destino, ids_origem):
     print("Limpando somente A:I e O:P da aba PLAN_PRINCIPAL...")
     print("As colunas J:N serão preservadas.")
 
-    aba_destino.batch_clear([
-        DESTINO_RANGE_LIMPAR_BASE,
-        DESTINO_RANGE_LIMPAR_EXTRA
-    ])
+    executar_com_retry(
+        lambda: aba_destino.batch_clear([
+            DESTINO_RANGE_LIMPAR_BASE,
+            DESTINO_RANGE_LIMPAR_EXTRA
+        ]),
+        descricao="limpar PLAN_PRINCIPAL A:I e O:P"
+    )
 
     print("Aplicando formatação na aba PLAN_PRINCIPAL...")
 
@@ -843,8 +1050,7 @@ def executar_bloco_3(gc, drive_service, planilha_destino, ids_origem):
             aba=aba_destino,
             dados=dados_base_a_i,
             linha_inicial=4,
-            coluna_inicial="A",
-            tamanho_bloco=1000
+            coluna_inicial="A"
         )
 
         print("Gravando dados O:P na aba PLAN_PRINCIPAL...")
@@ -853,8 +1059,7 @@ def executar_bloco_3(gc, drive_service, planilha_destino, ids_origem):
             aba=aba_destino,
             dados=dados_extra_o_p,
             linha_inicial=4,
-            coluna_inicial="O",
-            tamanho_bloco=1000
+            coluna_inicial="O"
         )
     else:
         print("Nenhum dado para gravar na aba PLAN_PRINCIPAL.")
@@ -869,8 +1074,18 @@ def executar_bloco_3(gc, drive_service, planilha_destino, ids_origem):
 def main():
     gc, drive_service = autenticar_google()
 
-    planilha_destino = gc.open_by_key(DESTINO_ID)
-    aba_config = planilha_destino.worksheet(CONFIG_ABA)
+    cache_planilhas = {}
+    cache_dados = {}
+
+    planilha_destino = executar_com_retry(
+        lambda: gc.open_by_key(DESTINO_ID),
+        descricao="abrir planilha destino"
+    )
+
+    aba_config = executar_com_retry(
+        lambda: planilha_destino.worksheet(CONFIG_ABA),
+        descricao="abrir aba Config"
+    )
 
     ids_origem = ler_ids_planilhas_origem(aba_config)
 
@@ -885,20 +1100,26 @@ def main():
         gc=gc,
         planilha_destino=planilha_destino,
         aba_config=aba_config,
-        ids_origem=ids_origem
+        ids_origem=ids_origem,
+        cache_planilhas=cache_planilhas,
+        cache_dados=cache_dados
     )
 
     executar_bloco_2(
         gc=gc,
         planilha_destino=planilha_destino,
-        ids_origem=ids_origem
+        ids_origem=ids_origem,
+        cache_planilhas=cache_planilhas,
+        cache_dados=cache_dados
     )
 
     executar_bloco_3(
         gc=gc,
         drive_service=drive_service,
         planilha_destino=planilha_destino,
-        ids_origem=ids_origem
+        ids_origem=ids_origem,
+        cache_planilhas=cache_planilhas,
+        cache_dados=cache_dados
     )
 
     print("")
