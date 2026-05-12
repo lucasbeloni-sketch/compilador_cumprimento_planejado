@@ -2,10 +2,13 @@ import os
 import json
 import base64
 import re
+import csv
+import io
 from datetime import datetime, date, timedelta
 
 import gspread
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 
 # ==========================
@@ -17,6 +20,8 @@ DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
 CONFIG_ABA = "Config"
 CELULA_DATA_REFERENCIA = "B2"
 RANGE_IDS_ORIGEM = "B4:B"
+
+PASTA_CSV_BLOCO_3_ID = "1f5Z0f73IZD4rBEssNb9OVtADLVZzttaF"
 
 ORIGEM_RANGE = "B6:BE"
 
@@ -33,22 +38,24 @@ DESTINO_RANGE_LIMPAR_BLOCO_1 = "A4:I"
 DESTINO_RANGE_LIMPAR_BASE = "A4:I"
 DESTINO_RANGE_LIMPAR_EXTRA = "O4:P"
 
-# Índices relativos ao intervalo B:BE
-# B=0, C=1, D=2...
+# Índices relativos ao intervalo base.
+# Para Sheets: B:BE
+# Para CSV: A:BD
+# A lógica é a mesma, só muda a letra inicial da fonte.
 COLUNAS_ORIGEM_SELECIONADAS = [
-    0,   # B
-    5,   # G
-    6,   # H
-    11,  # M
-    36,  # AL
-    37,  # AM
-    38,  # AN
-    46,  # AV
-    55,  # BE
+    0,   # Sheets: B  | CSV: A
+    5,   # Sheets: G  | CSV: F
+    6,   # Sheets: H  | CSV: G
+    11,  # Sheets: M  | CSV: L
+    36,  # Sheets: AL | CSV: AK
+    37,  # Sheets: AM | CSV: AL
+    38,  # Sheets: AN | CSV: AM
+    46,  # Sheets: AV | CSV: AU
+    55,  # Sheets: BE | CSV: BD
 ]
 
-COLUNA_ORIGEM_AU = 45  # AU
-COLUNA_ORIGEM_AW = 47  # AW
+COLUNA_ORIGEM_EXTRA_1 = 45  # Sheets: AU | CSV: AT
+COLUNA_ORIGEM_EXTRA_2 = 47  # Sheets: AW | CSV: AV
 
 # No destino:
 # A = Data
@@ -66,7 +73,7 @@ COLUNAS_MOEDA_DESTINO = [
 # AUTENTICAÇÃO
 # ==========================
 
-def autenticar_google_sheets():
+def autenticar_google():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -88,7 +95,17 @@ def autenticar_google_sheets():
         )
 
     creds = Credentials.from_service_account_info(info, scopes=scopes)
-    return gspread.authorize(creds)
+
+    gc = gspread.authorize(creds)
+
+    drive_service = build(
+        "drive",
+        "v3",
+        credentials=creds,
+        cache_discovery=False
+    )
+
+    return gc, drive_service
 
 
 # ==========================
@@ -226,9 +243,9 @@ def selecionar_colunas_origem_base(linha):
 def selecionar_colunas_origem_com_extra(linha):
     """
     Layout destino:
-    A:I recebe as mesmas colunas base.
-    O recebe AU.
-    P recebe AW.
+    A:I recebe as colunas base.
+    O recebe coluna extra 1.
+    P recebe coluna extra 2.
 
     Importante:
     J:N não serão limpas nem alteradas, pois possuem fórmulas.
@@ -242,8 +259,8 @@ def selecionar_colunas_origem_com_extra(linha):
     ]
 
     extra_o_p = [
-        linha[COLUNA_ORIGEM_AU] if COLUNA_ORIGEM_AU < len(linha) else "",
-        linha[COLUNA_ORIGEM_AW] if COLUNA_ORIGEM_AW < len(linha) else "",
+        linha[COLUNA_ORIGEM_EXTRA_1] if COLUNA_ORIGEM_EXTRA_1 < len(linha) else "",
+        linha[COLUNA_ORIGEM_EXTRA_2] if COLUNA_ORIGEM_EXTRA_2 < len(linha) else "",
     ]
 
     return base_a_i, extra_o_p
@@ -360,8 +377,12 @@ def ler_ids_planilhas_origem(aba_config):
     return ids_unicos
 
 
+# ==========================
+# LEITURA GOOGLE SHEETS
+# ==========================
+
 def ler_dados_origem_com_filtro_data(gc, origem_id, aba_origem_nome, data_referencia):
-    print(f"Lendo origem: {origem_id} | Aba: {aba_origem_nome}")
+    print(f"Lendo origem Google Sheets: {origem_id} | Aba: {aba_origem_nome}")
 
     try:
         planilha_origem = gc.open_by_key(origem_id)
@@ -400,7 +421,7 @@ def ler_dados_origem_com_filtro_data(gc, origem_id, aba_origem_nome, data_refere
 
 
 def ler_dados_origem_sem_filtro_com_extra(gc, origem_id, aba_origem_nome):
-    print(f"Lendo origem: {origem_id} | Aba: {aba_origem_nome}")
+    print(f"Lendo origem Google Sheets: {origem_id} | Aba: {aba_origem_nome}")
 
     try:
         planilha_origem = gc.open_by_key(origem_id)
@@ -433,6 +454,144 @@ def ler_dados_origem_sem_filtro_com_extra(gc, origem_id, aba_origem_nome):
         print(f"Erro ao processar a origem {origem_id}, aba {aba_origem_nome}: {erro}")
         print("Essa origem será ignorada e o processo seguirá para a próxima.")
         return [], []
+
+
+# ==========================
+# LEITURA CSV DRIVE - BLOCO 3
+# ==========================
+
+def listar_arquivos_csv_drive(drive_service, pasta_id):
+    print(f"Buscando arquivos CSV na pasta Drive: {pasta_id}")
+
+    arquivos = []
+    page_token = None
+
+    query = (
+        f"'{pasta_id}' in parents "
+        f"and trashed = false "
+        f"and (mimeType = 'text/csv' or name contains '.csv' or name contains '.CSV')"
+    )
+
+    while True:
+        resposta = drive_service.files().list(
+            q=query,
+            spaces="drive",
+            fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
+            pageToken=page_token,
+            pageSize=1000,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
+
+        arquivos.extend(resposta.get("files", []))
+        page_token = resposta.get("nextPageToken")
+
+        if not page_token:
+            break
+
+    arquivos = sorted(arquivos, key=lambda x: x.get("name", ""))
+
+    print(f"Quantidade de CSVs encontrados: {len(arquivos)}")
+
+    return arquivos
+
+
+def baixar_csv_drive(drive_service, arquivo_id):
+    conteudo = drive_service.files().get_media(
+        fileId=arquivo_id,
+        supportsAllDrives=True
+    ).execute()
+
+    if isinstance(conteudo, str):
+        return conteudo
+
+    for encoding in ["utf-8-sig", "utf-8", "latin1", "cp1252"]:
+        try:
+            return conteudo.decode(encoding)
+        except Exception:
+            continue
+
+    return conteudo.decode("utf-8", errors="ignore")
+
+
+def detectar_delimitador_csv(texto_csv):
+    amostra = texto_csv[:5000]
+
+    qtd_ponto_virgula = amostra.count(";")
+    qtd_virgula = amostra.count(",")
+
+    if qtd_ponto_virgula >= qtd_virgula:
+        return ";"
+
+    return ","
+
+
+def ler_linhas_csv(texto_csv):
+    delimitador = detectar_delimitador_csv(texto_csv)
+
+    leitor = csv.reader(
+        io.StringIO(texto_csv),
+        delimiter=delimitador
+    )
+
+    linhas = list(leitor)
+
+    if not linhas:
+        return []
+
+    # Equivalente ao intervalo A2:BD:
+    # ignora a primeira linha e lê 56 colunas.
+    linhas_dados = linhas[1:]
+
+    linhas_dados = [
+        normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
+        for linha in linhas_dados
+        if linha_tem_dados(linha)
+    ]
+
+    return linhas_dados
+
+
+def ler_dados_csvs_bloco_3(drive_service):
+    print("")
+    print("Lendo CSVs do Drive para o Bloco 3...")
+
+    arquivos_csv = listar_arquivos_csv_drive(
+        drive_service=drive_service,
+        pasta_id=PASTA_CSV_BLOCO_3_ID
+    )
+
+    dados_base_a_i = []
+    dados_extra_o_p = []
+
+    for arquivo in arquivos_csv:
+        arquivo_id = arquivo.get("id")
+        arquivo_nome = arquivo.get("name")
+
+        print(f"Lendo CSV: {arquivo_nome}")
+
+        try:
+            texto_csv = baixar_csv_drive(
+                drive_service=drive_service,
+                arquivo_id=arquivo_id
+            )
+
+            linhas_csv = ler_linhas_csv(texto_csv)
+
+            for linha in linhas_csv:
+                base_a_i, extra_o_p = selecionar_colunas_origem_com_extra(linha)
+                dados_base_a_i.append(base_a_i)
+                dados_extra_o_p.append(extra_o_p)
+
+            print(f"Linhas aproveitadas do CSV {arquivo_nome}: {len(linhas_csv)}")
+
+        except Exception as erro:
+            print(f"Erro ao processar CSV {arquivo_nome}: {erro}")
+            print("Esse CSV será ignorado e o processo seguirá para o próximo.")
+
+    print(f"Total de linhas vindas dos CSVs no Bloco 3: {len(dados_base_a_i)}")
+
+    return dados_base_a_i, dados_extra_o_p
 
 
 # ==========================
@@ -617,16 +776,28 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
 # BLOCO 3
 # ==========================
 
-def executar_bloco_3(gc, planilha_destino, ids_origem):
+def executar_bloco_3(gc, drive_service, planilha_destino, ids_origem):
     print("")
     print("======================================")
-    print("INICIANDO BLOCO 3 - PLAN_PRINCIPAL > PLAN_PRINCIPAL")
+    print("INICIANDO BLOCO 3 - CSVs + PLAN_PRINCIPAL > PLAN_PRINCIPAL")
     print("======================================")
 
     aba_destino = planilha_destino.worksheet("PLAN_PRINCIPAL")
 
     dados_base_a_i = []
     dados_extra_o_p = []
+
+    # 1º - Lê primeiro os CSVs do Drive
+    base_csv, extra_csv = ler_dados_csvs_bloco_3(
+        drive_service=drive_service
+    )
+
+    dados_base_a_i.extend(base_csv)
+    dados_extra_o_p.extend(extra_csv)
+
+    # 2º - Depois lê as planilhas Google Sheets
+    print("")
+    print("Lendo planilhas Google Sheets para o Bloco 3...")
 
     for origem_id in ids_origem:
         base_origem, extra_origem = ler_dados_origem_sem_filtro_com_extra(
@@ -696,7 +867,7 @@ def executar_bloco_3(gc, planilha_destino, ids_origem):
 # ==========================
 
 def main():
-    gc = autenticar_google_sheets()
+    gc, drive_service = autenticar_google()
 
     planilha_destino = gc.open_by_key(DESTINO_ID)
     aba_config = planilha_destino.worksheet(CONFIG_ABA)
@@ -725,6 +896,7 @@ def main():
 
     executar_bloco_3(
         gc=gc,
+        drive_service=drive_service,
         planilha_destino=planilha_destino,
         ids_origem=ids_origem
     )
