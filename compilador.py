@@ -23,10 +23,15 @@ ORIGEM_RANGE = "B6:BE"
 QTD_COLUNAS_ORIGEM_RANGE = 56
 
 QTD_COLUNAS_DESTINO_BLOCO_1 = 9
-QTD_COLUNAS_DESTINO_BLOCO_2 = 16
+QTD_COLUNAS_DESTINO_BLOCO_2_BASE = 9
+QTD_COLUNAS_DESTINO_BLOCO_2_EXTRA = 2
 
 DESTINO_RANGE_LIMPAR_BLOCO_1 = "A4:I"
-DESTINO_RANGE_LIMPAR_BLOCO_2 = "A4:P"
+
+# Bloco 2:
+# NÃO limpar J:N, pois possuem fórmulas.
+DESTINO_RANGE_LIMPAR_BLOCO_2_BASE = "A4:I"
+DESTINO_RANGE_LIMPAR_BLOCO_2_EXTRA = "O4:P"
 
 # Índices relativos ao intervalo B:BE
 # B=0, C=1, D=2...
@@ -225,32 +230,23 @@ def selecionar_colunas_origem_bloco_2(linha):
     O recebe AU.
     P recebe AW.
 
-    Layout destino:
-    A = B
-    B = G
-    C = H
-    D = M
-    E = AL
-    F = AM
-    G = AN
-    H = AV
-    I = BE
-    J:N = vazio
-    O = AU
-    P = AW
+    Importante:
+    J:N não serão limpas nem alteradas, pois possuem fórmulas.
     """
 
     linha = normalizar_linha(linha, QTD_COLUNAS_ORIGEM_RANGE)
 
-    base = [
+    base_a_i = [
         linha[indice] if indice < len(linha) else ""
         for indice in COLUNAS_ORIGEM_SELECIONADAS
     ]
 
-    col_au = linha[COLUNA_ORIGEM_AU] if COLUNA_ORIGEM_AU < len(linha) else ""
-    col_aw = linha[COLUNA_ORIGEM_AW] if COLUNA_ORIGEM_AW < len(linha) else ""
+    extra_o_p = [
+        linha[COLUNA_ORIGEM_AU] if COLUNA_ORIGEM_AU < len(linha) else "",
+        linha[COLUNA_ORIGEM_AW] if COLUNA_ORIGEM_AW < len(linha) else "",
+    ]
 
-    return base + ["", "", "", "", ""] + [col_au, col_aw]
+    return base_a_i, extra_o_p
 
 
 def preparar_linha_para_envio(linha, qtd_colunas_destino):
@@ -421,19 +417,22 @@ def ler_dados_origem_sem_filtro_bloco_2(gc, origem_id, aba_origem_nome):
             if linha_tem_dados(linha)
         ]
 
-        dados_selecionados = [
-            selecionar_colunas_origem_bloco_2(linha)
-            for linha in dados_origem
-        ]
+        dados_base_a_i = []
+        dados_extra_o_p = []
 
-        print(f"Linhas encontradas nessa origem: {len(dados_selecionados)}")
+        for linha in dados_origem:
+            base_a_i, extra_o_p = selecionar_colunas_origem_bloco_2(linha)
+            dados_base_a_i.append(base_a_i)
+            dados_extra_o_p.append(extra_o_p)
 
-        return dados_selecionados
+        print(f"Linhas encontradas nessa origem: {len(dados_base_a_i)}")
+
+        return dados_base_a_i, dados_extra_o_p
 
     except Exception as erro:
         print(f"Erro ao processar a origem {origem_id}, aba {aba_origem_nome}: {erro}")
         print("Essa origem será ignorada e o processo seguirá para a próxima.")
-        return []
+        return [], []
 
 
 # ==========================
@@ -548,43 +547,64 @@ def executar_bloco_2(gc, planilha_destino, ids_origem):
 
     aba_destino = planilha_destino.worksheet("REPROGRAMADAS")
 
-    dados_reprogramadas = []
+    dados_base_a_i = []
+    dados_extra_o_p = []
 
     for origem_id in ids_origem:
-        dados_origem = ler_dados_origem_sem_filtro_bloco_2(
+        base_origem, extra_origem = ler_dados_origem_sem_filtro_bloco_2(
             gc=gc,
             origem_id=origem_id,
             aba_origem_nome="Reprogramadas"
         )
 
-        dados_reprogramadas.extend(dados_origem)
+        dados_base_a_i.extend(base_origem)
+        dados_extra_o_p.extend(extra_origem)
 
-    print(f"Total de linhas consolidadas no Bloco 2: {len(dados_reprogramadas)}")
+    print(f"Total de linhas consolidadas no Bloco 2: {len(dados_base_a_i)}")
 
-    dados_finais = [
-        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BLOCO_2)
-        for linha in dados_reprogramadas
+    dados_base_a_i = [
+        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BLOCO_2_BASE)
+        for linha in dados_base_a_i
     ]
 
-    print("Limpando intervalo da aba REPROGRAMADAS...")
+    dados_extra_o_p = [
+        normalizar_linha(linha, QTD_COLUNAS_DESTINO_BLOCO_2_EXTRA)
+        for linha in dados_extra_o_p
+    ]
 
-    aba_destino.batch_clear([DESTINO_RANGE_LIMPAR_BLOCO_2])
+    print("Limpando somente A:I e O:P da aba REPROGRAMADAS...")
+    print("As colunas J:N serão preservadas.")
+
+    aba_destino.batch_clear([
+        DESTINO_RANGE_LIMPAR_BLOCO_2_BASE,
+        DESTINO_RANGE_LIMPAR_BLOCO_2_EXTRA
+    ])
 
     print("Aplicando formatação na aba REPROGRAMADAS...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
-    if dados_finais:
-        ultima_linha_necessaria = 3 + len(dados_finais)
+    if dados_base_a_i:
+        ultima_linha_necessaria = 3 + len(dados_base_a_i)
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
 
-        print("Gravando dados atualizados na aba REPROGRAMADAS...")
+        print("Gravando dados A:I na aba REPROGRAMADAS...")
 
         escrever_em_blocos(
             aba=aba_destino,
-            dados=dados_finais,
+            dados=dados_base_a_i,
             linha_inicial=4,
             coluna_inicial="A",
+            tamanho_bloco=1000
+        )
+
+        print("Gravando dados O:P na aba REPROGRAMADAS...")
+
+        escrever_em_blocos(
+            aba=aba_destino,
+            dados=dados_extra_o_p,
+            linha_inicial=4,
+            coluna_inicial="O",
             tamanho_bloco=1000
         )
     else:
