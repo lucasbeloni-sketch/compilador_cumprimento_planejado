@@ -10,11 +10,13 @@ import random
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import gspread
 from gspread.exceptions import APIError, WorksheetNotFound
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 
 # Força logs em tempo real no GitHub Actions
@@ -34,7 +36,6 @@ CONFIG_ABA = "Config"
 CELULA_DATA_REFERENCIA = "B2"
 CELULA_TIMESTAMP_FINAL = "B1"
 
-# Evita ler a coluna B inteira
 RANGE_IDS_ORIGEM = "B4:B50"
 
 TIMEZONE = "America/Sao_Paulo"
@@ -45,10 +46,8 @@ ORIGEM_RANGE = "B6:BE"
 
 QTD_COLUNAS_ORIGEM_RANGE = 56
 
-# Bloco 1: GERAL usa A:I
 QTD_COLUNAS_DESTINO_GERAL = 9
 
-# Blocos 2 e 3 usam A:K + chave em L
 QTD_COLUNAS_DESTINO_COMPLETO = 11
 QTD_COLUNAS_DESTINO_COMPLETO_COM_CHAVE = 12
 
@@ -63,9 +62,6 @@ MAX_TENTATIVAS_API = 10
 ESPERA_INICIAL_429 = 15
 ESPERA_MAXIMA_429 = 120
 
-# Índices relativos ao intervalo base.
-# Para Sheets: B:BE
-# Para CSV: A:BD
 COLUNAS_ORIGEM_SELECIONADAS = [
     0,   # Sheets: B  | CSV: A
     5,   # Sheets: G  | CSV: F
@@ -88,6 +84,29 @@ COLUNAS_MOEDA_DESTINO = [
     5,  # F
     6,  # G
 ]
+
+
+# ==========================
+# CONFIGURAÇÕES BLOCO 0
+# ==========================
+
+BLOCO0_NEW_FOLDER_ID = "1QHtqMNCcIzNihwnu3copkNmBZnaL6Z6z"
+BLOCO0_OUTPUT_CSV_NAME = "BANCO.csv"
+BLOCO0_UPLOAD_FOLDER_ID = "17IobcQeVLs83rUCqWKTi18yXiAPbupjf"
+BLOCO0_SPREADSHEET_ID = DESTINO_ID
+BLOCO0_SHEET_NAME = "BD_ConsultaServ"
+BLOCO0_UPLOAD_BANCO_PARA_DRIVE = True
+
+BLOCO0_READ_CSV_KWARGS = dict(
+    dtype=str,
+    encoding="utf-8-sig",
+    sep=None,
+    engine="python"
+)
+
+BLOCO0_KEEP_COL_POS_1BASED = [47, 6, 27, 50, 52, 68, 70]
+
+BLOCO0_DATE_REGEX = r"(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}|\d{4}[\/\-.]\d{1,2}[\/\-.]\d{1,2})"
 
 
 # ==========================
@@ -210,11 +229,18 @@ def autenticar_google():
         cache_discovery=False
     )
 
-    return gc, drive_service
+    sheets_service = build(
+        "sheets",
+        "v4",
+        credentials=creds,
+        cache_discovery=False
+    )
+
+    return gc, drive_service, sheets_service
 
 
 # ==========================
-# FUNÇÕES AUXILIARES
+# FUNÇÕES AUXILIARES GERAIS
 # ==========================
 
 def normalizar_linha(linha, qtd_colunas):
@@ -246,12 +272,6 @@ def valor_para_chave(valor):
 
 
 def calcular_chave_linha(linha):
-    """
-    Equivalente a:
-    A & B & C & E
-
-    Se A estiver vazia, retorna vazio.
-    """
     linha = normalizar_linha(linha, max(len(linha), 5))
 
     if str(linha[0]).strip() == "":
@@ -266,9 +286,6 @@ def calcular_chave_linha(linha):
 
 
 def adicionar_chave_l(dados):
-    """
-    Adiciona a coluna L como valor, sem fórmula.
-    """
     dados_com_chave = []
 
     for linha in dados:
@@ -279,12 +296,6 @@ def adicionar_chave_l(dados):
 
 
 def construir_mapa_lookup(dados):
-    """
-    Cria mapa:
-    chave L -> [J, K]
-
-    Mantém a primeira ocorrência, igual ao comportamento do PROCV.
-    """
     mapa = {}
 
     for linha in dados:
@@ -305,12 +316,6 @@ def construir_mapa_lookup(dados):
 
 
 def calcular_extras_geral(dados_geral, mapa_plan_principal, mapa_reprogramadas):
-    """
-    Calcula O:P e Q da aba GERAL como valores.
-
-    Q = A & B & C & E
-    O:P = busca Q primeiro no PLAN_PRINCIPAL, depois em REPROGRAMADAS.
-    """
     extras = []
 
     for linha in dados_geral:
@@ -342,15 +347,6 @@ def atualizar_lookup_geral_todas_linhas(
     mapa_plan_principal,
     mapa_reprogramadas
 ):
-    """
-    Atualiza GERAL!O:Q para todas as linhas existentes da aba GERAL.
-
-    O:P = busca pela chave Q primeiro em PLAN_PRINCIPAL, depois em REPROGRAMADAS.
-    Q = A & B & C & E
-
-    Tudo é gravado como valor, sem fórmula.
-    """
-
     log("Atualizando GERAL!O:Q para todas as linhas da aba GERAL...")
 
     dados_geral = executar_com_retry(
@@ -684,6 +680,440 @@ def atualizar_timestamp_final(aba_config):
 
 
 # ==========================
+# BLOCO 0 - BANCO.csv / BD_ConsultaServ
+# ==========================
+
+def bloco0_list_files(drive_service, folder_id, drive_id=None):
+    query = f"'{folder_id}' in parents and trashed = false"
+    files = []
+    token = None
+
+    while True:
+        params = {
+            "q": query,
+            "pageToken": token,
+            "pageSize": 1000,
+            "fields": "nextPageToken, files(id,name,mimeType)",
+            "supportsAllDrives": True,
+            "includeItemsFromAllDrives": True,
+        }
+
+        if drive_id:
+            params["corpora"] = "drive"
+            params["driveId"] = drive_id
+        else:
+            params["corpora"] = "allDrives"
+
+        resp = executar_com_retry(
+            lambda params=params: drive_service.files().list(**params).execute(),
+            descricao=f"listar arquivos da pasta {folder_id}"
+        )
+
+        files.extend(resp.get("files", []))
+        token = resp.get("nextPageToken")
+
+        if not token:
+            break
+
+    return files
+
+
+def bloco0_download_file(drive_service, file_id, filename):
+    request = drive_service.files().get_media(
+        fileId=file_id,
+        supportsAllDrives=True
+    )
+
+    with open(filename, "wb") as f:
+        downloader = MediaIoBaseDownload(f, request)
+        done = False
+
+        while not done:
+            _, done = executar_com_retry(
+                lambda: downloader.next_chunk(),
+                descricao=f"baixar arquivo {filename}"
+            )
+
+
+def bloco0_find_file_in_folder(drive_service, folder_id, drive_id, filename):
+    nome_seguro = filename.replace("'", "\\'")
+    query = f"'{folder_id}' in parents and trashed = false and name = '{nome_seguro}'"
+
+    params = {
+        "q": query,
+        "fields": "files(id,name)",
+        "pageSize": 10,
+        "supportsAllDrives": True,
+        "includeItemsFromAllDrives": True,
+    }
+
+    if drive_id:
+        params["corpora"] = "drive"
+        params["driveId"] = drive_id
+    else:
+        params["corpora"] = "allDrives"
+
+    resp = executar_com_retry(
+        lambda: drive_service.files().list(**params).execute(),
+        descricao=f"procurar {filename} no Drive"
+    )
+
+    files = resp.get("files", [])
+
+    return files[0]["id"] if files else None
+
+
+def bloco0_upload_or_update_banco(drive_service, folder_id, drive_id, local_path, filename):
+    media = MediaFileUpload(
+        local_path,
+        mimetype="text/csv",
+        resumable=True
+    )
+
+    existing_id = bloco0_find_file_in_folder(
+        drive_service=drive_service,
+        folder_id=folder_id,
+        drive_id=drive_id,
+        filename=filename
+    )
+
+    if existing_id:
+        executar_com_retry(
+            lambda: drive_service.files().update(
+                fileId=existing_id,
+                media_body=media,
+                supportsAllDrives=True
+            ).execute(),
+            descricao=f"atualizar {filename} no Drive"
+        )
+        return "updated"
+
+    executar_com_retry(
+        lambda: drive_service.files().create(
+            body={"name": filename, "parents": [folder_id]},
+            media_body=media,
+            supportsAllDrives=True
+        ).execute(),
+        descricao=f"criar {filename} no Drive"
+    )
+
+    return "created"
+
+
+def bloco0_keep_only_columns_by_position(df, positions_1based):
+    idx = [p - 1 for p in positions_1based]
+    return df.iloc[:, idx]
+
+
+def bloco0_to_number_ptbr(value):
+    if value is None:
+        return 0.0
+
+    s = str(value).strip()
+
+    if s == "" or s.lower() in ("nan", "none"):
+        return 0.0
+
+    s = s.replace(" ", "")
+
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def bloco0_extrair_data_string(series: pd.Series) -> pd.Series:
+    s = series.astype(str).str.strip()
+
+    s = (
+        s.str.replace("\u200b", "", regex=False)
+         .str.replace("\xa0", " ", regex=False)
+         .str.replace(r"\s+", " ", regex=True)
+         .str.replace("None", "", regex=False)
+         .str.replace("nan", "", regex=False)
+    )
+
+    extracted = s.str.extract(BLOCO0_DATE_REGEX, expand=False)
+    extracted = extracted.str.replace("-", "/", regex=False).str.replace(".", "/", regex=False)
+
+    return extracted
+
+
+def bloco0_inferir_formato_por_arquivo(extracted_dates: pd.Series) -> str:
+    parts = extracted_dates.dropna().str.split("/", expand=True)
+
+    if parts.empty or parts.shape[1] < 3:
+        return "DMY"
+
+    a = pd.to_numeric(parts[0], errors="coerce")
+    b = pd.to_numeric(parts[1], errors="coerce")
+
+    dmy_votes = ((a > 12) & (b <= 12)).sum()
+    mdy_votes = ((b > 12) & (a <= 12)).sum()
+
+    if dmy_votes == 0 and mdy_votes == 0:
+        return "DMY"
+
+    return "DMY" if dmy_votes >= mdy_votes else "MDY"
+
+
+def bloco0_parse_date_por_arquivo(df: pd.DataFrame, col_data: str, col_arquivo: str) -> pd.Series:
+    extracted = bloco0_extrair_data_string(df[col_data])
+
+    def normalizar_ano(x: str) -> str:
+        if not isinstance(x, str) or x.strip() == "":
+            return x
+
+        p = x.split("/")
+
+        if len(p) != 3:
+            return x
+
+        if len(p[0]) == 4:
+            return x
+
+        if len(p[2]) == 2:
+            return f"{p[0]}/{p[1]}/20{p[2]}"
+
+        return x
+
+    extracted = extracted.apply(normalizar_ano)
+
+    parsed_final = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+
+    for arquivo, idxs in df.groupby(col_arquivo).groups.items():
+        ext_grp = extracted.loc[idxs]
+
+        formato = bloco0_inferir_formato_por_arquivo(ext_grp)
+
+        iso_mask = ext_grp.str.match(r"^\d{4}/\d{1,2}/\d{1,2}$", na=False)
+
+        if iso_mask.any():
+            parsed_final.loc[iso_mask.index[iso_mask]] = pd.to_datetime(
+                ext_grp.loc[iso_mask.index[iso_mask]],
+                errors="coerce",
+                format="%Y/%m/%d"
+            )
+
+        rest_idx = ext_grp.index[~iso_mask]
+
+        if len(rest_idx) > 0:
+            dayfirst = True if formato == "DMY" else False
+            parsed_final.loc[rest_idx] = pd.to_datetime(
+                ext_grp.loc[rest_idx],
+                errors="coerce",
+                dayfirst=dayfirst
+            )
+
+        validas = pd.to_datetime(
+            ext_grp,
+            errors="coerce",
+            dayfirst=(formato == "DMY")
+        ).notna().sum()
+
+        log(
+            f"[BLOCO 0][DATA] arquivo_origem={arquivo} | "
+            f"formato_inferido={formato} | amostras_validas={validas}"
+        )
+
+    return parsed_final
+
+
+def bloco0_clear_range(sheets_service, spreadsheet_id, range_):
+    executar_com_retry(
+        lambda: sheets_service.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id,
+            range=range_
+        ).execute(),
+        descricao=f"limpar range {range_}"
+    )
+
+
+def bloco0_upload_to_sheets(sheets_service, df):
+    df_sheets = df.iloc[:, :7].copy()
+    df_sheets = df_sheets.fillna("")
+    values = df_sheets.values.tolist()
+
+    bloco0_clear_range(
+        sheets_service,
+        BLOCO0_SPREADSHEET_ID,
+        f"{BLOCO0_SHEET_NAME}!A3:G"
+    )
+
+    executar_com_retry(
+        lambda: sheets_service.spreadsheets().values().update(
+            spreadsheetId=BLOCO0_SPREADSHEET_ID,
+            range=f"{BLOCO0_SHEET_NAME}!A3",
+            valueInputOption="USER_ENTERED",
+            body={"values": values}
+        ).execute(),
+        descricao=f"gravar {BLOCO0_SHEET_NAME}!A3:G"
+    )
+
+    timestamp = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d/%m/%Y %H:%M:%S")
+
+    executar_com_retry(
+        lambda: sheets_service.spreadsheets().values().update(
+            spreadsheetId=BLOCO0_SPREADSHEET_ID,
+            range=f"{BLOCO0_SHEET_NAME}!B1",
+            valueInputOption="USER_ENTERED",
+            body={"values": [[timestamp]]}
+        ).execute(),
+        descricao=f"atualizar timestamp {BLOCO0_SHEET_NAME}!B1"
+    )
+
+
+def executar_bloco_0(drive_service, sheets_service):
+    log("")
+    log("======================================")
+    log("INICIANDO BLOCO 0 - BANCO.csv > BD_ConsultaServ")
+    log("======================================")
+
+    folder = executar_com_retry(
+        lambda: drive_service.files().get(
+            fileId=BLOCO0_NEW_FOLDER_ID,
+            fields="id,name,driveId",
+            supportsAllDrives=True
+        ).execute(),
+        descricao="abrir pasta de origem do Bloco 0"
+    )
+
+    drive_id_origem = folder.get("driveId")
+
+    log(f"[BLOCO 0][OK] Pasta origem: {folder.get('name', BLOCO0_NEW_FOLDER_ID)}")
+
+    files = bloco0_list_files(
+        drive_service=drive_service,
+        folder_id=BLOCO0_NEW_FOLDER_ID,
+        drive_id=drive_id_origem
+    )
+
+    csv_files = [
+        f for f in files
+        if f["name"].lower().endswith(".csv")
+        and f["name"] != BLOCO0_OUTPUT_CSV_NAME
+    ]
+
+    log(f"[BLOCO 0][INFO] CSVs encontrados: {len(csv_files)}")
+
+    dfs = []
+    temp_files = []
+
+    for f in csv_files:
+        nome_base = f["name"].replace("/", "_").replace("\\", "_")
+        local_name = f"tmp_bloco0_{f['id']}_{nome_base}"
+
+        bloco0_download_file(
+            drive_service=drive_service,
+            file_id=f["id"],
+            filename=local_name
+        )
+
+        temp_files.append(local_name)
+
+        try:
+            df = pd.read_csv(local_name, **BLOCO0_READ_CSV_KWARGS)
+            df["arquivo_origem"] = nome_base
+            dfs.append(df)
+            log(f"[BLOCO 0][OK] CSV lido: {nome_base} | linhas: {len(df)}")
+        except Exception as e:
+            log(f"[BLOCO 0][ERRO] {nome_base}: {e}")
+
+    for f in temp_files:
+        try:
+            os.remove(f)
+        except Exception:
+            pass
+
+    if not dfs:
+        log("[BLOCO 0][ERRO] Nenhum CSV válido.")
+        log("Bloco 0 finalizado sem dados.")
+        return
+
+    banco_df = pd.concat(dfs, ignore_index=True).drop_duplicates()
+
+    origem_col = banco_df["arquivo_origem"].copy()
+
+    banco_df = bloco0_keep_only_columns_by_position(
+        banco_df,
+        BLOCO0_KEEP_COL_POS_1BASED
+    )
+
+    banco_df.columns = [
+        "centro_servico",
+        "Nota",
+        "cod_pep_obra",
+        "equipe",
+        "obs_servico",
+        "dta_exec_srv",
+        "total_servicos"
+    ]
+
+    banco_df["arquivo_origem"] = origem_col.values
+
+    banco_df["cod_pep_obra"] = banco_df["cod_pep_obra"].fillna("").astype(str).str.upper()
+    banco_df["total_servicos"] = banco_df["total_servicos"].apply(bloco0_to_number_ptbr)
+
+    banco_df["dta_exec_srv"] = bloco0_parse_date_por_arquivo(
+        banco_df,
+        "dta_exec_srv",
+        "arquivo_origem"
+    )
+
+    total = len(banco_df)
+    validas = banco_df["dta_exec_srv"].notna().sum()
+    invalidas = total - validas
+
+    log(f"[BLOCO 0][DATA] Total: {total} | Válidas: {validas} | Inválidas: {invalidas}")
+
+    banco_df = banco_df.sort_values(
+        by="dta_exec_srv",
+        ascending=True,
+        kind="mergesort"
+    ).reset_index(drop=True)
+
+    banco_df["dta_exec_srv"] = banco_df["dta_exec_srv"].dt.strftime("%d/%m/%Y")
+
+    banco_df.to_csv(
+        BLOCO0_OUTPUT_CSV_NAME,
+        index=False,
+        encoding="utf-8-sig",
+        sep=";",
+        decimal=",",
+        float_format="%.2f"
+    )
+
+    bloco0_upload_to_sheets(sheets_service, banco_df)
+
+    if BLOCO0_UPLOAD_BANCO_PARA_DRIVE:
+        upload_folder = executar_com_retry(
+            lambda: drive_service.files().get(
+                fileId=BLOCO0_UPLOAD_FOLDER_ID,
+                fields="id,name,driveId",
+                supportsAllDrives=True
+            ).execute(),
+            descricao="abrir pasta de upload do BANCO.csv"
+        )
+
+        drive_id_upload = upload_folder.get("driveId") or drive_id_origem
+
+        action = bloco0_upload_or_update_banco(
+            drive_service=drive_service,
+            folder_id=BLOCO0_UPLOAD_FOLDER_ID,
+            drive_id=drive_id_upload,
+            local_path=BLOCO0_OUTPUT_CSV_NAME,
+            filename=BLOCO0_OUTPUT_CSV_NAME
+        )
+
+        log(f"[BLOCO 0][OK] BANCO.csv enviado ao Drive ({action}).")
+
+    log("Bloco 0 finalizado com sucesso.")
+
+
+# ==========================
 # BLOCO 1 OTIMIZADO - GERAL
 # ==========================
 
@@ -859,7 +1289,6 @@ def substituir_bloco_data_geral(
     log(f"GERAL - quantidade antiga da data: {qtd_antiga}")
     log(f"GERAL - quantidade nova da data: {qtd_nova}")
 
-    # A:Q para manter O:P:Q alinhado com A:I
     qtd_colunas_shift = 17
 
     if qtd_antiga == 0 and qtd_nova == 0:
@@ -1550,10 +1979,15 @@ def executar_bloco_1(
 def main():
     log("Iniciando compilador...")
 
-    gc, drive_service = autenticar_google()
+    gc, drive_service, sheets_service = autenticar_google()
 
     cache_planilhas = {}
     cache_dados = {}
+
+    executar_bloco_0(
+        drive_service=drive_service,
+        sheets_service=sheets_service
+    )
 
     planilha_destino = executar_com_retry(
         lambda: gc.open_by_key(DESTINO_ID),
@@ -1574,7 +2008,6 @@ def main():
 
     log(f"Quantidade de planilhas de origem encontradas: {len(ids_origem)}")
 
-    # Primeiro atualiza as bases de apoio, pois a GERAL usa PLAN_PRINCIPAL e REPROGRAMADAS como lookup
     mapa_reprogramadas = executar_bloco_2(
         gc=gc,
         planilha_destino=planilha_destino,
