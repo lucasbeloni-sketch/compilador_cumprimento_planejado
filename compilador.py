@@ -34,8 +34,7 @@ CONFIG_ABA = "Config"
 CELULA_DATA_REFERENCIA = "B2"
 CELULA_TIMESTAMP_FINAL = "B1"
 
-# Evita ler a coluna B inteira.
-# Ajuste o B50 caso futuramente tenha mais de 47 IDs.
+# Evita ler a coluna B inteira
 RANGE_IDS_ORIGEM = "B4:B50"
 
 TIMEZONE = "America/Sao_Paulo"
@@ -48,19 +47,18 @@ QTD_COLUNAS_ORIGEM_RANGE = 56
 
 # Bloco 1: GERAL usa A:I
 QTD_COLUNAS_DESTINO_GERAL = 9
-DESTINO_RANGE_GERAL = "A4:I"
 
-# Blocos 2 e 3 usam A:K
-# J e K recebem os dados extras que antes estavam indo para O e P
+# Blocos 2 e 3 usam A:K + chave em L
 QTD_COLUNAS_DESTINO_COMPLETO = 11
-DESTINO_RANGE_COMPLETO = "A4:K"
+QTD_COLUNAS_DESTINO_COMPLETO_COM_CHAVE = 12
+
+DESTINO_RANGE_COMPLETO_COM_CHAVE = "A4:L"
 
 TAMANHO_BLOCO_ESCRITA = 10000
 
 PAUSA_APOS_LEITURA = 0.5
 PAUSA_APOS_ESCRITA = 1.0
 
-# Retry reforçado para erro 429/503 da API Google
 MAX_TENTATIVAS_API = 10
 ESPERA_INICIAL_429 = 15
 ESPERA_MAXIMA_429 = 120
@@ -230,6 +228,113 @@ def normalizar_linha(linha, qtd_colunas):
 
 def linha_tem_dados(linha):
     return any(str(celula).strip() != "" for celula in linha)
+
+
+def valor_para_chave(valor):
+    if valor is None:
+        return ""
+
+    if isinstance(valor, float):
+        if valor.is_integer():
+            return str(int(valor))
+        return str(valor)
+
+    if isinstance(valor, int):
+        return str(valor)
+
+    return str(valor)
+
+
+def calcular_chave_linha(linha):
+    """
+    Equivalente a:
+    A & B & C & E
+
+    Se A estiver vazia, retorna vazio.
+    """
+    linha = normalizar_linha(linha, max(len(linha), 5))
+
+    if str(linha[0]).strip() == "":
+        return ""
+
+    return (
+        valor_para_chave(linha[0])
+        + valor_para_chave(linha[1])
+        + valor_para_chave(linha[2])
+        + valor_para_chave(linha[4])
+    )
+
+
+def adicionar_chave_l(dados):
+    """
+    Adiciona a coluna L como valor, sem fórmula.
+    """
+    dados_com_chave = []
+
+    for linha in dados:
+        chave = calcular_chave_linha(linha)
+        dados_com_chave.append(linha + [chave])
+
+    return dados_com_chave
+
+
+def construir_mapa_lookup(dados):
+    """
+    Cria mapa:
+    chave L -> [J, K]
+
+    Mantém a primeira ocorrência, igual ao comportamento do PROCV.
+    """
+    mapa = {}
+
+    for linha in dados:
+        linha = normalizar_linha(linha, QTD_COLUNAS_DESTINO_COMPLETO)
+
+        chave = calcular_chave_linha(linha)
+
+        if not chave:
+            continue
+
+        if chave not in mapa:
+            mapa[chave] = [
+                linha[9] if len(linha) > 9 else "",
+                linha[10] if len(linha) > 10 else "",
+            ]
+
+    return mapa
+
+
+def calcular_extras_geral(dados_geral, mapa_plan_principal, mapa_reprogramadas):
+    """
+    Calcula O:P e Q da aba GERAL como valores.
+
+    Q = A & B & C & E
+    O:P = busca Q primeiro no PLAN_PRINCIPAL, depois em REPROGRAMADAS.
+    """
+    extras = []
+
+    for linha in dados_geral:
+        chave = calcular_chave_linha(linha)
+
+        if not chave:
+            extras.append(["", "", ""])
+            continue
+
+        valores = mapa_plan_principal.get(chave)
+
+        if valores is None:
+            valores = mapa_reprogramadas.get(chave)
+
+        if valores is None:
+            valores = ["", ""]
+
+        extras.append([
+            valores[0] if len(valores) > 0 else "",
+            valores[1] if len(valores) > 1 else "",
+            chave
+        ])
+
+    return extras
 
 
 def remover_linhas_vazias_base(dados, nome_bloco=""):
@@ -647,23 +752,30 @@ def deletar_intervalo_celulas(planilha_destino, aba_destino, linha_inicio, linha
 
     executar_com_retry(
         lambda: planilha_destino.batch_update({"requests": requests}),
-        descricao=f"deletar células {aba_destino.title}!A{linha_inicio}:I{linha_fim}"
+        descricao=f"deletar células {aba_destino.title}!A{linha_inicio}:Q{linha_fim}"
     )
 
 
-def limpar_intervalo_geral(aba_destino, linha_inicio, linha_fim):
+def limpar_intervalos_geral(aba_destino, linha_inicio, linha_fim):
     if linha_inicio is None or linha_fim is None or linha_fim < linha_inicio:
         return
 
-    intervalo = f"A{linha_inicio}:I{linha_fim}"
+    intervalo_dados = f"A{linha_inicio}:I{linha_fim}"
+    intervalo_lookup = f"O{linha_inicio}:Q{linha_fim}"
 
     executar_com_retry(
-        lambda: aba_destino.batch_clear([intervalo]),
-        descricao=f"limpar GERAL!{intervalo}"
+        lambda: aba_destino.batch_clear([intervalo_dados, intervalo_lookup]),
+        descricao=f"limpar GERAL!{intervalo_dados} e GERAL!{intervalo_lookup}"
     )
 
 
-def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data_referencia):
+def substituir_bloco_data_geral(
+    planilha_destino,
+    aba_destino,
+    dados_novos,
+    extras_o_p_q,
+    data_referencia
+):
     info_bloco = localizar_bloco_data_geral(
         aba_destino=aba_destino,
         data_referencia=data_referencia
@@ -674,6 +786,9 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
 
     log(f"GERAL - quantidade antiga da data: {qtd_antiga}")
     log(f"GERAL - quantidade nova da data: {qtd_nova}")
+
+    # A:Q para manter O:P:Q alinhado com A:I
+    qtd_colunas_shift = 17
 
     if qtd_antiga == 0 and qtd_nova == 0:
         log("Nada para substituir na GERAL.")
@@ -686,7 +801,7 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
             aba_destino=aba_destino,
             linha_inicio=info_bloco["linha_inicio"],
             linha_fim=info_bloco["linha_fim"],
-            qtd_colunas=QTD_COLUNAS_DESTINO_GERAL
+            qtd_colunas=qtd_colunas_shift
         )
         return
 
@@ -700,7 +815,7 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
             aba_destino=aba_destino,
             linha_inicio=linha_insercao,
             quantidade_linhas=qtd_nova,
-            qtd_colunas=QTD_COLUNAS_DESTINO_GERAL
+            qtd_colunas=qtd_colunas_shift
         )
 
         escrever_em_blocos(
@@ -708,6 +823,13 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
             dados=dados_novos,
             linha_inicial=linha_insercao,
             coluna_inicial="A"
+        )
+
+        escrever_em_blocos(
+            aba=aba_destino,
+            dados=extras_o_p_q,
+            linha_inicial=linha_insercao,
+            coluna_inicial="O"
         )
 
         return
@@ -725,7 +847,7 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
             aba_destino=aba_destino,
             linha_inicio=linha_inserir,
             quantidade_linhas=diferenca,
-            qtd_colunas=QTD_COLUNAS_DESTINO_GERAL
+            qtd_colunas=qtd_colunas_shift
         )
 
     elif qtd_nova < qtd_antiga:
@@ -740,12 +862,13 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
             aba_destino=aba_destino,
             linha_inicio=linha_delete_inicio,
             linha_fim=linha_delete_fim,
-            qtd_colunas=QTD_COLUNAS_DESTINO_GERAL
+            qtd_colunas=qtd_colunas_shift
         )
 
     if dados_novos:
         linha_fim_nova = linha_inicio + len(dados_novos) - 1
-        limpar_intervalo_geral(aba_destino, linha_inicio, linha_fim_nova)
+
+        limpar_intervalos_geral(aba_destino, linha_inicio, linha_fim_nova)
 
         log(f"Atualizando somente o bloco da data na GERAL a partir da linha {linha_inicio}.")
 
@@ -754,6 +877,13 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
             dados=dados_novos,
             linha_inicial=linha_inicio,
             coluna_inicial="A"
+        )
+
+        escrever_em_blocos(
+            aba=aba_destino,
+            dados=extras_o_p_q,
+            linha_inicial=linha_inicio,
+            coluna_inicial="O"
         )
 
 
@@ -1068,89 +1198,6 @@ def ler_dados_csvs_bloco_3(drive_service):
 
 
 # ==========================
-# BLOCO 1
-# ==========================
-
-def executar_bloco_1(
-    gc,
-    planilha_destino,
-    aba_config,
-    ids_origem,
-    cache_planilhas,
-    cache_dados
-):
-    log("")
-    log("======================================")
-    log("INICIANDO BLOCO 1 - PLAN_PRINCIPAL > GERAL")
-    log("======================================")
-
-    aba_destino = executar_com_retry(
-        lambda: planilha_destino.worksheet("GERAL"),
-        descricao="abrir aba GERAL"
-    )
-
-    valor_data_referencia = executar_com_retry(
-        lambda: aba_config.acell(
-            CELULA_DATA_REFERENCIA,
-            value_render_option="FORMATTED_VALUE"
-        ).value,
-        descricao=f"ler data em {CONFIG_ABA}!{CELULA_DATA_REFERENCIA}"
-    )
-
-    data_referencia = converter_para_data(valor_data_referencia)
-
-    if not data_referencia:
-        raise Exception(
-            f"Não foi possível identificar uma data válida na célula {CELULA_DATA_REFERENCIA} "
-            f"da aba {CONFIG_ABA}. Valor encontrado: {valor_data_referencia}"
-        )
-
-    log(f"Data de referência considerada no Bloco 1: {data_referencia.strftime('%d/%m/%Y')}")
-
-    dados_data_referencia = []
-
-    for origem_id in ids_origem:
-        dados_origem = ler_dados_origem_com_filtro_data(
-            gc=gc,
-            origem_id=origem_id,
-            aba_origem_nome="Plan_Principal",
-            data_referencia=data_referencia,
-            cache_planilhas=cache_planilhas,
-            cache_dados=cache_dados
-        )
-
-        dados_data_referencia.extend(dados_origem)
-
-    log(f"Total bruto de linhas consolidadas no Bloco 1: {len(dados_data_referencia)}")
-
-    dados_data_referencia = [
-        linha
-        for linha in dados_data_referencia
-        if linha_tem_dados(linha)
-    ]
-
-    log(f"Total final de linhas úteis no Bloco 1: {len(dados_data_referencia)}")
-
-    dados_data_referencia = [
-        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_GERAL)
-        for linha in dados_data_referencia
-    ]
-
-    log("Aplicando formatação na aba GERAL...")
-
-    aplicar_formatacao_destino(planilha_destino, aba_destino)
-
-    substituir_bloco_data_geral(
-        planilha_destino=planilha_destino,
-        aba_destino=aba_destino,
-        dados_novos=dados_data_referencia,
-        data_referencia=data_referencia
-    )
-
-    log("Bloco 1 finalizado com sucesso.")
-
-
-# ==========================
 # BLOCO 2
 # ==========================
 
@@ -1198,26 +1245,30 @@ def executar_bloco_2(
         for linha in dados
     ]
 
-    log("Limpando A4:K da aba REPROGRAMADAS...")
+    mapa_reprogramadas = construir_mapa_lookup(dados)
+
+    dados_com_chave = adicionar_chave_l(dados)
+
+    log("Limpando A4:L da aba REPROGRAMADAS...")
 
     executar_com_retry(
-        lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO]),
-        descricao="limpar REPROGRAMADAS!A4:K"
+        lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO_COM_CHAVE]),
+        descricao="limpar REPROGRAMADAS!A4:L"
     )
 
     log("Aplicando formatação na aba REPROGRAMADAS...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
-    if dados:
-        ultima_linha_necessaria = 3 + len(dados)
+    if dados_com_chave:
+        ultima_linha_necessaria = 3 + len(dados_com_chave)
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
 
-        log("Gravando dados A:K na aba REPROGRAMADAS...")
+        log("Gravando dados A:L na aba REPROGRAMADAS...")
 
         escrever_em_blocos(
             aba=aba_destino,
-            dados=dados,
+            dados=dados_com_chave,
             linha_inicial=4,
             coluna_inicial="A"
         )
@@ -1225,6 +1276,8 @@ def executar_bloco_2(
         log("Nenhum dado para gravar na aba REPROGRAMADAS.")
 
     log("Bloco 2 finalizado com sucesso.")
+
+    return mapa_reprogramadas
 
 
 # ==========================
@@ -1285,26 +1338,30 @@ def executar_bloco_3(
         for linha in dados
     ]
 
-    log("Limpando A4:K da aba PLAN_PRINCIPAL...")
+    mapa_plan_principal = construir_mapa_lookup(dados)
+
+    dados_com_chave = adicionar_chave_l(dados)
+
+    log("Limpando A4:L da aba PLAN_PRINCIPAL...")
 
     executar_com_retry(
-        lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO]),
-        descricao="limpar PLAN_PRINCIPAL!A4:K"
+        lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO_COM_CHAVE]),
+        descricao="limpar PLAN_PRINCIPAL!A4:L"
     )
 
     log("Aplicando formatação na aba PLAN_PRINCIPAL...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
-    if dados:
-        ultima_linha_necessaria = 3 + len(dados)
+    if dados_com_chave:
+        ultima_linha_necessaria = 3 + len(dados_com_chave)
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
 
-        log("Gravando dados A:K na aba PLAN_PRINCIPAL...")
+        log("Gravando dados A:L na aba PLAN_PRINCIPAL...")
 
         escrever_em_blocos(
             aba=aba_destino,
-            dados=dados,
+            dados=dados_com_chave,
             linha_inicial=4,
             coluna_inicial="A"
         )
@@ -1312,6 +1369,100 @@ def executar_bloco_3(
         log("Nenhum dado para gravar na aba PLAN_PRINCIPAL.")
 
     log("Bloco 3 finalizado com sucesso.")
+
+    return mapa_plan_principal
+
+
+# ==========================
+# BLOCO 1
+# ==========================
+
+def executar_bloco_1(
+    gc,
+    planilha_destino,
+    aba_config,
+    ids_origem,
+    cache_planilhas,
+    cache_dados,
+    mapa_plan_principal,
+    mapa_reprogramadas
+):
+    log("")
+    log("======================================")
+    log("INICIANDO BLOCO 1 - PLAN_PRINCIPAL > GERAL")
+    log("======================================")
+
+    aba_destino = executar_com_retry(
+        lambda: planilha_destino.worksheet("GERAL"),
+        descricao="abrir aba GERAL"
+    )
+
+    valor_data_referencia = executar_com_retry(
+        lambda: aba_config.acell(
+            CELULA_DATA_REFERENCIA,
+            value_render_option="FORMATTED_VALUE"
+        ).value,
+        descricao=f"ler data em {CONFIG_ABA}!{CELULA_DATA_REFERENCIA}"
+    )
+
+    data_referencia = converter_para_data(valor_data_referencia)
+
+    if not data_referencia:
+        raise Exception(
+            f"Não foi possível identificar uma data válida na célula {CELULA_DATA_REFERENCIA} "
+            f"da aba {CONFIG_ABA}. Valor encontrado: {valor_data_referencia}"
+        )
+
+    log(f"Data de referência considerada no Bloco 1: {data_referencia.strftime('%d/%m/%Y')}")
+
+    dados_data_referencia = []
+
+    for origem_id in ids_origem:
+        dados_origem = ler_dados_origem_com_filtro_data(
+            gc=gc,
+            origem_id=origem_id,
+            aba_origem_nome="Plan_Principal",
+            data_referencia=data_referencia,
+            cache_planilhas=cache_planilhas,
+            cache_dados=cache_dados
+        )
+
+        dados_data_referencia.extend(dados_origem)
+
+    log(f"Total bruto de linhas consolidadas no Bloco 1: {len(dados_data_referencia)}")
+
+    dados_data_referencia = [
+        linha
+        for linha in dados_data_referencia
+        if linha_tem_dados(linha)
+    ]
+
+    log(f"Total final de linhas úteis no Bloco 1: {len(dados_data_referencia)}")
+
+    dados_data_referencia = [
+        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_GERAL)
+        for linha in dados_data_referencia
+    ]
+
+    extras_o_p_q = calcular_extras_geral(
+        dados_geral=dados_data_referencia,
+        mapa_plan_principal=mapa_plan_principal,
+        mapa_reprogramadas=mapa_reprogramadas
+    )
+
+    log("Aplicando formatação na aba GERAL...")
+
+    aplicar_formatacao_destino(planilha_destino, aba_destino)
+
+    substituir_bloco_data_geral(
+        planilha_destino=planilha_destino,
+        aba_destino=aba_destino,
+        dados_novos=dados_data_referencia,
+        extras_o_p_q=extras_o_p_q,
+        data_referencia=data_referencia
+    )
+
+    log("Bloco 1 finalizado com sucesso.")
 
 
 # ==========================
@@ -1345,16 +1496,8 @@ def main():
 
     log(f"Quantidade de planilhas de origem encontradas: {len(ids_origem)}")
 
-    executar_bloco_1(
-        gc=gc,
-        planilha_destino=planilha_destino,
-        aba_config=aba_config,
-        ids_origem=ids_origem,
-        cache_planilhas=cache_planilhas,
-        cache_dados=cache_dados
-    )
-
-    executar_bloco_2(
+    # Primeiro atualiza as bases de apoio, pois a GERAL usa PLAN_PRINCIPAL e REPROGRAMADAS como lookup
+    mapa_reprogramadas = executar_bloco_2(
         gc=gc,
         planilha_destino=planilha_destino,
         ids_origem=ids_origem,
@@ -1362,13 +1505,24 @@ def main():
         cache_dados=cache_dados
     )
 
-    executar_bloco_3(
+    mapa_plan_principal = executar_bloco_3(
         gc=gc,
         drive_service=drive_service,
         planilha_destino=planilha_destino,
         ids_origem=ids_origem,
         cache_planilhas=cache_planilhas,
         cache_dados=cache_dados
+    )
+
+    executar_bloco_1(
+        gc=gc,
+        planilha_destino=planilha_destino,
+        aba_config=aba_config,
+        ids_origem=ids_origem,
+        cache_planilhas=cache_planilhas,
+        cache_dados=cache_dados,
+        mapa_plan_principal=mapa_plan_principal,
+        mapa_reprogramadas=mapa_reprogramadas
     )
 
     atualizar_timestamp_final(aba_config)
