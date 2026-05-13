@@ -1,4 +1,4 @@
-name: Copiar Plan_Principal para BARREIRAS
+name: Executar compilador
 
 on:
   workflow_dispatch:
@@ -27,4 +27,5 @@ jobs:
       - name: Executar script
         env:
           GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
-        run: python compilador.py
+          PYTHONUNBUFFERED: "1"
+        run: python -u compilador.py
