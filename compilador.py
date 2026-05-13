@@ -35,25 +35,20 @@ ORIGEM_RANGE = "B6:BE"
 
 QTD_COLUNAS_ORIGEM_RANGE = 56
 
-QTD_COLUNAS_DESTINO_BLOCO_1 = 9
-QTD_COLUNAS_DESTINO_BASE = 9
-QTD_COLUNAS_DESTINO_EXTRA = 2
+# Bloco 1: GERAL usa A:I
+QTD_COLUNAS_DESTINO_GERAL = 9
+DESTINO_RANGE_GERAL = "A4:I"
 
-DESTINO_RANGE_LIMPAR_BLOCO_1 = "A4:I"
+# Blocos 2 e 3: REPROGRAMADAS e PLAN_PRINCIPAL usam A:K
+# J e K recebem os dados extras que antes estavam indo para O e P
+QTD_COLUNAS_DESTINO_COMPLETO = 11
+DESTINO_RANGE_COMPLETO = "A4:K"
 
-# Blocos 2 e 3:
-# NÃO limpar J:N, pois possuem fórmulas.
-DESTINO_RANGE_LIMPAR_BASE = "A4:I"
-DESTINO_RANGE_LIMPAR_EXTRA = "O4:P"
-
-# Escreve blocos maiores para reduzir requisições na API.
 TAMANHO_BLOCO_ESCRITA = 10000
 
-# Pequenas pausas para reduzir risco de 429.
 PAUSA_APOS_LEITURA = 1.5
 PAUSA_APOS_ESCRITA = 2.5
 
-# Retry para erro de quota / instabilidade.
 MAX_TENTATIVAS_API = 7
 ESPERA_INICIAL_429 = 20
 ESPERA_MAXIMA_429 = 90
@@ -76,9 +71,6 @@ COLUNAS_ORIGEM_SELECIONADAS = [
 COLUNA_ORIGEM_EXTRA_1 = 45  # Sheets: AU | CSV: AT
 COLUNA_ORIGEM_EXTRA_2 = 47  # Sheets: AW | CSV: AV
 
-# No destino:
-# A = Data
-# E, F, G = Moeda
 COLUNA_DATA_DESTINO = 0
 
 COLUNAS_MOEDA_DESTINO = [
@@ -212,25 +204,20 @@ def linha_tem_dados(linha):
     return any(str(celula).strip() != "" for celula in linha)
 
 
-def remover_linhas_vazias_pareadas(dados_base_a_i, dados_extra_o_p, nome_bloco=""):
+def remover_linhas_vazias_base(dados, nome_bloco=""):
     """
     Remove linhas que ficariam vazias no destino.
-
-    A validação principal é feita em A:I.
-    Se A:I ficar totalmente vazio depois da seleção das colunas,
-    a linha é removida junto com o par correspondente de O:P.
+    A validação é feita nas colunas A:I.
     """
 
-    base_filtrada = []
-    extra_filtrada = []
+    filtradas = []
     removidas = 0
 
-    for i, base in enumerate(dados_base_a_i):
-        extra = dados_extra_o_p[i] if i < len(dados_extra_o_p) else ["", ""]
+    for linha in dados:
+        base = linha[:QTD_COLUNAS_DESTINO_GERAL]
 
         if linha_tem_dados(base):
-            base_filtrada.append(base)
-            extra_filtrada.append(extra)
+            filtradas.append(linha)
         else:
             removidas += 1
 
@@ -239,7 +226,7 @@ def remover_linhas_vazias_pareadas(dados_base_a_i, dados_extra_o_p, nome_bloco="
     else:
         print(f"Linhas vazias removidas: {removidas}")
 
-    return base_filtrada, extra_filtrada
+    return filtradas
 
 
 def converter_para_data(valor):
@@ -365,12 +352,12 @@ def selecionar_colunas_origem_com_extra(linha):
         for indice in COLUNAS_ORIGEM_SELECIONADAS
     ]
 
-    extra_o_p = [
+    extra_j_k = [
         linha[COLUNA_ORIGEM_EXTRA_1] if COLUNA_ORIGEM_EXTRA_1 < len(linha) else "",
         linha[COLUNA_ORIGEM_EXTRA_2] if COLUNA_ORIGEM_EXTRA_2 < len(linha) else "",
     ]
 
-    return base_a_i, extra_o_p
+    return base_a_i + extra_j_k
 
 
 def preparar_linha_para_envio(linha, qtd_colunas_destino):
@@ -481,10 +468,6 @@ def aplicar_formatacao_destino(planilha_destino, aba_destino):
 
 
 def atualizar_timestamp_final(aba_config):
-    """
-    Atualiza a célula B1 da aba Config com a data/hora final da execução.
-    """
-
     agora = datetime.now(ZoneInfo(TIMEZONE))
     timestamp = agora.strftime("%d/%m/%Y %H:%M:%S")
 
@@ -499,6 +482,267 @@ def atualizar_timestamp_final(aba_config):
         descricao=f"atualizar timestamp em {CONFIG_ABA}!{CELULA_TIMESTAMP_FINAL}"
     )
 
+
+# ==========================
+# OTIMIZAÇÃO DO BLOCO 1 - GERAL
+# ==========================
+
+def ordenar_geral_por_data_desc(planilha_destino, aba_destino):
+    print("Ordenando GERAL!A4:I por data decrescente...")
+
+    sheet_id = aba_destino.id
+
+    requests = [{
+        "sortRange": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 3,
+                "endRowIndex": aba_destino.row_count,
+                "startColumnIndex": 0,
+                "endColumnIndex": QTD_COLUNAS_DESTINO_GERAL
+            },
+            "sortSpecs": [{
+                "dimensionIndex": 0,
+                "sortOrder": "DESCENDING"
+            }]
+        }
+    }]
+
+    executar_com_retry(
+        lambda: planilha_destino.batch_update({"requests": requests}),
+        descricao="ordenar GERAL por data"
+    )
+
+
+def localizar_bloco_data_geral(aba_destino, data_referencia):
+    print("Localizando bloco da data de referência na GERAL...")
+
+    valores_coluna_a = executar_com_retry(
+        lambda: aba_destino.get(
+            "A4:A",
+            value_render_option="FORMATTED_VALUE"
+        ),
+        descricao="ler GERAL!A4:A"
+    )
+
+    time.sleep(PAUSA_APOS_LEITURA)
+
+    linhas_data_referencia = []
+    primeira_linha_mais_antiga = None
+    ultima_linha_com_data = 3
+
+    for i, linha in enumerate(valores_coluna_a):
+        numero_linha = 4 + i
+        valor = linha[0] if linha else ""
+
+        if str(valor).strip():
+            ultima_linha_com_data = numero_linha
+
+        data_linha = converter_para_data(valor)
+
+        if data_linha == data_referencia:
+            linhas_data_referencia.append(numero_linha)
+
+        elif (
+            primeira_linha_mais_antiga is None
+            and data_linha is not None
+            and data_linha < data_referencia
+        ):
+            primeira_linha_mais_antiga = numero_linha
+
+    if linhas_data_referencia:
+        linha_inicio = min(linhas_data_referencia)
+        linha_fim = max(linhas_data_referencia)
+        quantidade = linha_fim - linha_inicio + 1
+
+        print(
+            f"Bloco existente encontrado na GERAL: "
+            f"linhas {linha_inicio} até {linha_fim} ({quantidade} linhas)."
+        )
+
+        return {
+            "existe": True,
+            "linha_inicio": linha_inicio,
+            "linha_fim": linha_fim,
+            "quantidade": quantidade,
+            "linha_insercao": linha_inicio
+        }
+
+    if primeira_linha_mais_antiga:
+        linha_insercao = primeira_linha_mais_antiga
+    else:
+        linha_insercao = ultima_linha_com_data + 1
+
+    if linha_insercao < 4:
+        linha_insercao = 4
+
+    print(
+        f"Nenhum bloco existente para a data de referência. "
+        f"Nova inserção será feita a partir da linha {linha_insercao}."
+    )
+
+    return {
+        "existe": False,
+        "linha_inicio": None,
+        "linha_fim": None,
+        "quantidade": 0,
+        "linha_insercao": linha_insercao
+    }
+
+
+def inserir_intervalo_celulas(planilha_destino, aba_destino, linha_inicio, quantidade_linhas, qtd_colunas):
+    if quantidade_linhas <= 0:
+        return
+
+    garantir_linhas_suficientes(
+        aba_destino,
+        linha_inicio + quantidade_linhas + 5
+    )
+
+    sheet_id = aba_destino.id
+
+    requests = [{
+        "insertRange": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": linha_inicio - 1,
+                "endRowIndex": linha_inicio - 1 + quantidade_linhas,
+                "startColumnIndex": 0,
+                "endColumnIndex": qtd_colunas
+            },
+            "shiftDimension": "ROWS"
+        }
+    }]
+
+    executar_com_retry(
+        lambda: planilha_destino.batch_update({"requests": requests}),
+        descricao=f"inserir {quantidade_linhas} linhas/células em {aba_destino.title}"
+    )
+
+
+def deletar_intervalo_celulas(planilha_destino, aba_destino, linha_inicio, linha_fim, qtd_colunas):
+    if linha_inicio is None or linha_fim is None or linha_fim < linha_inicio:
+        return
+
+    sheet_id = aba_destino.id
+
+    requests = [{
+        "deleteRange": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": linha_inicio - 1,
+                "endRowIndex": linha_fim,
+                "startColumnIndex": 0,
+                "endColumnIndex": qtd_colunas
+            },
+            "shiftDimension": "ROWS"
+        }
+    }]
+
+    executar_com_retry(
+        lambda: planilha_destino.batch_update({"requests": requests}),
+        descricao=f"deletar células {aba_destino.title}!A{linha_inicio}:I{linha_fim}"
+    )
+
+
+def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data_referencia):
+    ordenar_geral_por_data_desc(planilha_destino, aba_destino)
+
+    info_bloco = localizar_bloco_data_geral(
+        aba_destino=aba_destino,
+        data_referencia=data_referencia
+    )
+
+    qtd_nova = len(dados_novos)
+    qtd_antiga = info_bloco["quantidade"]
+
+    if qtd_antiga == 0 and qtd_nova == 0:
+        print("Nada para substituir na GERAL.")
+        return
+
+    if qtd_antiga > 0 and qtd_nova == 0:
+        print("Removendo bloco antigo da data, pois não há dados novos.")
+        deletar_intervalo_celulas(
+            planilha_destino=planilha_destino,
+            aba_destino=aba_destino,
+            linha_inicio=info_bloco["linha_inicio"],
+            linha_fim=info_bloco["linha_fim"],
+            qtd_colunas=QTD_COLUNAS_DESTINO_GERAL
+        )
+        return
+
+    if qtd_antiga == 0 and qtd_nova > 0:
+        print(f"Inserindo novo bloco com {qtd_nova} linhas na GERAL.")
+
+        linha_insercao = info_bloco["linha_insercao"]
+
+        inserir_intervalo_celulas(
+            planilha_destino=planilha_destino,
+            aba_destino=aba_destino,
+            linha_inicio=linha_insercao,
+            quantidade_linhas=qtd_nova,
+            qtd_colunas=QTD_COLUNAS_DESTINO_GERAL
+        )
+
+        escrever_em_blocos(
+            aba=aba_destino,
+            dados=dados_novos,
+            linha_inicial=linha_insercao,
+            coluna_inicial="A"
+        )
+
+        return
+
+    linha_inicio = info_bloco["linha_inicio"]
+
+    if qtd_nova > qtd_antiga:
+        diferenca = qtd_nova - qtd_antiga
+        linha_inserir = linha_inicio + qtd_antiga
+
+        print(
+            f"Bloco novo maior que o antigo. "
+            f"Inserindo {diferenca} linhas/células extras na GERAL."
+        )
+
+        inserir_intervalo_celulas(
+            planilha_destino=planilha_destino,
+            aba_destino=aba_destino,
+            linha_inicio=linha_inserir,
+            quantidade_linhas=diferenca,
+            qtd_colunas=QTD_COLUNAS_DESTINO_GERAL
+        )
+
+    elif qtd_nova < qtd_antiga:
+        diferenca = qtd_antiga - qtd_nova
+        linha_delete_inicio = linha_inicio + qtd_nova
+        linha_delete_fim = linha_inicio + qtd_antiga - 1
+
+        print(
+            f"Bloco novo menor que o antigo. "
+            f"Removendo {diferenca} linhas/células antigas da GERAL."
+        )
+
+        deletar_intervalo_celulas(
+            planilha_destino=planilha_destino,
+            aba_destino=aba_destino,
+            linha_inicio=linha_delete_inicio,
+            linha_fim=linha_delete_fim,
+            qtd_colunas=QTD_COLUNAS_DESTINO_GERAL
+        )
+
+    print(f"Atualizando somente o bloco da data na GERAL a partir da linha {linha_inicio}.")
+
+    escrever_em_blocos(
+        aba=aba_destino,
+        dados=dados_novos,
+        linha_inicial=linha_inicio,
+        coluna_inicial="A"
+    )
+
+
+# ==========================
+# GOOGLE SHEETS ORIGEM
+# ==========================
 
 def obter_planilha_origem(gc, origem_id, cache_planilhas):
     if origem_id in cache_planilhas:
@@ -598,10 +842,6 @@ def ler_ids_planilhas_origem(aba_config):
     return ids_unicos
 
 
-# ==========================
-# LEITURA GOOGLE SHEETS
-# ==========================
-
 def ler_dados_origem_com_filtro_data(
     gc,
     origem_id,
@@ -649,22 +889,18 @@ def ler_dados_origem_sem_filtro_com_extra(
         cache_dados=cache_dados
     )
 
-    dados_base_a_i = []
-    dados_extra_o_p = []
+    dados = []
 
     for linha in dados_origem:
-        base_a_i, extra_o_p = selecionar_colunas_origem_com_extra(linha)
+        dados.append(selecionar_colunas_origem_com_extra(linha))
 
-        dados_base_a_i.append(base_a_i)
-        dados_extra_o_p.append(extra_o_p)
+    print(f"Linhas encontradas nessa origem: {len(dados)}")
 
-    print(f"Linhas encontradas nessa origem: {len(dados_base_a_i)}")
-
-    return dados_base_a_i, dados_extra_o_p
+    return dados
 
 
 # ==========================
-# LEITURA CSV DRIVE - BLOCO 3
+# CSV DRIVE - BLOCO 3
 # ==========================
 
 def listar_arquivos_csv_drive(drive_service, pasta_id):
@@ -752,8 +988,6 @@ def ler_linhas_csv(texto_csv):
     if not linhas:
         return []
 
-    # Equivalente ao intervalo A2:BD:
-    # ignora a primeira linha e lê 56 colunas.
     linhas_dados = linhas[1:]
 
     linhas_dados = [
@@ -774,8 +1008,7 @@ def ler_dados_csvs_bloco_3(drive_service):
         pasta_id=PASTA_CSV_BLOCO_3_ID
     )
 
-    dados_base_a_i = []
-    dados_extra_o_p = []
+    dados = []
 
     for arquivo in arquivos_csv:
         arquivo_id = arquivo.get("id")
@@ -795,15 +1028,13 @@ def ler_dados_csvs_bloco_3(drive_service):
             linhas_vazias_selecao = 0
 
             for linha in linhas_csv:
-                base_a_i, extra_o_p = selecionar_colunas_origem_com_extra(linha)
+                linha_destino = selecionar_colunas_origem_com_extra(linha)
 
-                # Evita enviar linha que ficará vazia no destino.
-                if not linha_tem_dados(base_a_i):
+                if not linha_tem_dados(linha_destino[:QTD_COLUNAS_DESTINO_GERAL]):
                     linhas_vazias_selecao += 1
                     continue
 
-                dados_base_a_i.append(base_a_i)
-                dados_extra_o_p.append(extra_o_p)
+                dados.append(linha_destino)
                 linhas_aproveitadas += 1
 
             print(f"Linhas lidas do CSV {arquivo_nome}: {len(linhas_csv)}")
@@ -814,9 +1045,9 @@ def ler_dados_csvs_bloco_3(drive_service):
             print(f"Erro ao processar CSV {arquivo_nome}: {erro}")
             print("Esse CSV será ignorado e o processo seguirá para o próximo.")
 
-    print(f"Total de linhas vindas dos CSVs no Bloco 3: {len(dados_base_a_i)}")
+    print(f"Total de linhas vindas dos CSVs no Bloco 3: {len(dados)}")
 
-    return dados_base_a_i, dados_extra_o_p
+    return dados
 
 
 # ==========================
@@ -873,70 +1104,31 @@ def executar_bloco_1(
 
         dados_data_referencia.extend(dados_origem)
 
-    print(f"Total de linhas consolidadas no Bloco 1: {len(dados_data_referencia)}")
+    print(f"Total bruto de linhas consolidadas no Bloco 1: {len(dados_data_referencia)}")
 
-    print("Lendo dados atuais da aba GERAL...")
-
-    dados_destino = executar_com_retry(
-        lambda: aba_destino.get(
-            DESTINO_RANGE_LIMPAR_BLOCO_1,
-            value_render_option="FORMATTED_VALUE"
-        ),
-        descricao=f"ler destino GERAL!{DESTINO_RANGE_LIMPAR_BLOCO_1}"
-    )
-
-    time.sleep(PAUSA_APOS_LEITURA)
-
-    dados_destino = [
-        normalizar_linha(linha, QTD_COLUNAS_DESTINO_BLOCO_1)
-        for linha in dados_destino
+    dados_data_referencia = [
+        linha
+        for linha in dados_data_referencia
         if linha_tem_dados(linha)
     ]
 
-    dados_destino_sem_data_referencia = [
-        linha
-        for linha in dados_destino
-        if not eh_data_referencia(linha[0], data_referencia)
+    print(f"Total final de linhas úteis no Bloco 1: {len(dados_data_referencia)}")
+
+    dados_data_referencia = [
+        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_GERAL)
+        for linha in dados_data_referencia
     ]
-
-    print(f"Linhas antigas mantidas na GERAL: {len(dados_destino_sem_data_referencia)}")
-    print(
-        f"Linhas removidas da GERAL por serem da data de referência: "
-        f"{len(dados_destino) - len(dados_destino_sem_data_referencia)}"
-    )
-
-    dados_finais = dados_data_referencia + dados_destino_sem_data_referencia
-
-    dados_finais = [
-        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BLOCO_1)
-        for linha in dados_finais
-    ]
-
-    print("Limpando intervalo da aba GERAL...")
-
-    executar_com_retry(
-        lambda: aba_destino.batch_clear([DESTINO_RANGE_LIMPAR_BLOCO_1]),
-        descricao=f"limpar GERAL!{DESTINO_RANGE_LIMPAR_BLOCO_1}"
-    )
 
     print("Aplicando formatação na aba GERAL...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
-    if dados_finais:
-        ultima_linha_necessaria = 3 + len(dados_finais)
-        garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
-
-        print("Gravando dados atualizados na aba GERAL...")
-
-        escrever_em_blocos(
-            aba=aba_destino,
-            dados=dados_finais,
-            linha_inicial=4,
-            coluna_inicial="A"
-        )
-    else:
-        print("Nenhum dado para gravar na aba GERAL.")
+    substituir_bloco_data_geral(
+        planilha_destino=planilha_destino,
+        aba_destino=aba_destino,
+        dados_novos=dados_data_referencia,
+        data_referencia=data_referencia
+    )
 
     print("Bloco 1 finalizado com sucesso.")
 
@@ -962,11 +1154,10 @@ def executar_bloco_2(
         descricao="abrir aba REPROGRAMADAS"
     )
 
-    dados_base_a_i = []
-    dados_extra_o_p = []
+    dados = []
 
     for origem_id in ids_origem:
-        base_origem, extra_origem = ler_dados_origem_sem_filtro_com_extra(
+        dados_origem = ler_dados_origem_sem_filtro_com_extra(
             gc=gc,
             origem_id=origem_id,
             aba_origem_nome="Reprogramadas",
@@ -974,64 +1165,44 @@ def executar_bloco_2(
             cache_dados=cache_dados
         )
 
-        dados_base_a_i.extend(base_origem)
-        dados_extra_o_p.extend(extra_origem)
+        dados.extend(dados_origem)
 
-    print(f"Total bruto de linhas consolidadas no Bloco 2: {len(dados_base_a_i)}")
+    print(f"Total bruto de linhas consolidadas no Bloco 2: {len(dados)}")
 
-    dados_base_a_i, dados_extra_o_p = remover_linhas_vazias_pareadas(
-        dados_base_a_i=dados_base_a_i,
-        dados_extra_o_p=dados_extra_o_p,
+    dados = remover_linhas_vazias_base(
+        dados=dados,
         nome_bloco="Bloco 2"
     )
 
-    print(f"Total final de linhas úteis no Bloco 2: {len(dados_base_a_i)}")
+    print(f"Total final de linhas úteis no Bloco 2: {len(dados)}")
 
-    dados_base_a_i = [
-        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BASE)
-        for linha in dados_base_a_i
+    dados = [
+        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_COMPLETO)
+        for linha in dados
     ]
 
-    dados_extra_o_p = [
-        normalizar_linha(linha, QTD_COLUNAS_DESTINO_EXTRA)
-        for linha in dados_extra_o_p
-    ]
-
-    print("Limpando somente A:I e O:P da aba REPROGRAMADAS...")
-    print("As colunas J:N serão preservadas.")
+    print("Limpando A4:K da aba REPROGRAMADAS...")
 
     executar_com_retry(
-        lambda: aba_destino.batch_clear([
-            DESTINO_RANGE_LIMPAR_BASE,
-            DESTINO_RANGE_LIMPAR_EXTRA
-        ]),
-        descricao="limpar REPROGRAMADAS A:I e O:P"
+        lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO]),
+        descricao="limpar REPROGRAMADAS!A4:K"
     )
 
     print("Aplicando formatação na aba REPROGRAMADAS...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
-    if dados_base_a_i:
-        ultima_linha_necessaria = 3 + len(dados_base_a_i)
+    if dados:
+        ultima_linha_necessaria = 3 + len(dados)
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
 
-        print("Gravando dados A:I na aba REPROGRAMADAS...")
+        print("Gravando dados A:K na aba REPROGRAMADAS...")
 
         escrever_em_blocos(
             aba=aba_destino,
-            dados=dados_base_a_i,
+            dados=dados,
             linha_inicial=4,
             coluna_inicial="A"
-        )
-
-        print("Gravando dados O:P na aba REPROGRAMADAS...")
-
-        escrever_em_blocos(
-            aba=aba_destino,
-            dados=dados_extra_o_p,
-            linha_inicial=4,
-            coluna_inicial="O"
         )
     else:
         print("Nenhum dado para gravar na aba REPROGRAMADAS.")
@@ -1061,23 +1232,19 @@ def executar_bloco_3(
         descricao="abrir aba PLAN_PRINCIPAL"
     )
 
-    dados_base_a_i = []
-    dados_extra_o_p = []
+    dados = []
 
-    # 1º - Lê primeiro os CSVs do Drive
-    base_csv, extra_csv = ler_dados_csvs_bloco_3(
+    dados_csv = ler_dados_csvs_bloco_3(
         drive_service=drive_service
     )
 
-    dados_base_a_i.extend(base_csv)
-    dados_extra_o_p.extend(extra_csv)
+    dados.extend(dados_csv)
 
-    # 2º - Depois lê as planilhas Google Sheets
     print("")
     print("Lendo planilhas Google Sheets para o Bloco 3...")
 
     for origem_id in ids_origem:
-        base_origem, extra_origem = ler_dados_origem_sem_filtro_com_extra(
+        dados_origem = ler_dados_origem_sem_filtro_com_extra(
             gc=gc,
             origem_id=origem_id,
             aba_origem_nome="Plan_Principal",
@@ -1085,64 +1252,44 @@ def executar_bloco_3(
             cache_dados=cache_dados
         )
 
-        dados_base_a_i.extend(base_origem)
-        dados_extra_o_p.extend(extra_origem)
+        dados.extend(dados_origem)
 
-    print(f"Total bruto de linhas consolidadas no Bloco 3: {len(dados_base_a_i)}")
+    print(f"Total bruto de linhas consolidadas no Bloco 3: {len(dados)}")
 
-    dados_base_a_i, dados_extra_o_p = remover_linhas_vazias_pareadas(
-        dados_base_a_i=dados_base_a_i,
-        dados_extra_o_p=dados_extra_o_p,
+    dados = remover_linhas_vazias_base(
+        dados=dados,
         nome_bloco="Bloco 3"
     )
 
-    print(f"Total final de linhas úteis no Bloco 3: {len(dados_base_a_i)}")
+    print(f"Total final de linhas úteis no Bloco 3: {len(dados)}")
 
-    dados_base_a_i = [
-        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_BASE)
-        for linha in dados_base_a_i
+    dados = [
+        preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_COMPLETO)
+        for linha in dados
     ]
 
-    dados_extra_o_p = [
-        normalizar_linha(linha, QTD_COLUNAS_DESTINO_EXTRA)
-        for linha in dados_extra_o_p
-    ]
-
-    print("Limpando somente A:I e O:P da aba PLAN_PRINCIPAL...")
-    print("As colunas J:N serão preservadas.")
+    print("Limpando A4:K da aba PLAN_PRINCIPAL...")
 
     executar_com_retry(
-        lambda: aba_destino.batch_clear([
-            DESTINO_RANGE_LIMPAR_BASE,
-            DESTINO_RANGE_LIMPAR_EXTRA
-        ]),
-        descricao="limpar PLAN_PRINCIPAL A:I e O:P"
+        lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO]),
+        descricao="limpar PLAN_PRINCIPAL!A4:K"
     )
 
     print("Aplicando formatação na aba PLAN_PRINCIPAL...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
-    if dados_base_a_i:
-        ultima_linha_necessaria = 3 + len(dados_base_a_i)
+    if dados:
+        ultima_linha_necessaria = 3 + len(dados)
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
 
-        print("Gravando dados A:I na aba PLAN_PRINCIPAL...")
+        print("Gravando dados A:K na aba PLAN_PRINCIPAL...")
 
         escrever_em_blocos(
             aba=aba_destino,
-            dados=dados_base_a_i,
+            dados=dados,
             linha_inicial=4,
             coluna_inicial="A"
-        )
-
-        print("Gravando dados O:P na aba PLAN_PRINCIPAL...")
-
-        escrever_em_blocos(
-            aba=aba_destino,
-            dados=dados_extra_o_p,
-            linha_inicial=4,
-            coluna_inicial="O"
         )
     else:
         print("Nenhum dado para gravar na aba PLAN_PRINCIPAL.")
