@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import base64
 import re
@@ -14,6 +15,13 @@ from gspread.exceptions import APIError, WorksheetNotFound
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+
+# Força logs em tempo real no GitHub Actions
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 
 # ==========================
@@ -39,19 +47,19 @@ QTD_COLUNAS_ORIGEM_RANGE = 56
 QTD_COLUNAS_DESTINO_GERAL = 9
 DESTINO_RANGE_GERAL = "A4:I"
 
-# Blocos 2 e 3: REPROGRAMADAS e PLAN_PRINCIPAL usam A:K
+# Blocos 2 e 3 usam A:K
 # J e K recebem os dados extras que antes estavam indo para O e P
 QTD_COLUNAS_DESTINO_COMPLETO = 11
 DESTINO_RANGE_COMPLETO = "A4:K"
 
 TAMANHO_BLOCO_ESCRITA = 10000
 
-PAUSA_APOS_LEITURA = 1.5
-PAUSA_APOS_ESCRITA = 2.5
+PAUSA_APOS_LEITURA = 0.5
+PAUSA_APOS_ESCRITA = 1.0
 
-MAX_TENTATIVAS_API = 7
-ESPERA_INICIAL_429 = 20
-ESPERA_MAXIMA_429 = 90
+MAX_TENTATIVAS_API = 5
+ESPERA_INICIAL_429 = 8
+ESPERA_MAXIMA_429 = 45
 
 # Índices relativos ao intervalo base.
 # Para Sheets: B:BE
@@ -78,6 +86,14 @@ COLUNAS_MOEDA_DESTINO = [
     5,  # F
     6,  # G
 ]
+
+
+# ==========================
+# LOG
+# ==========================
+
+def log(msg):
+    print(msg, flush=True)
 
 
 # ==========================
@@ -135,9 +151,9 @@ def executar_com_retry(funcao, descricao="operação Google API"):
                 ESPERA_INICIAL_429 * (2 ** (tentativa - 1))
             )
 
-            espera += random.uniform(1, 5)
+            espera += random.uniform(1, 3)
 
-            print(
+            log(
                 f"Aviso: erro temporário/API quota em '{descricao}'. "
                 f"Tentativa {tentativa}/{MAX_TENTATIVAS_API}. "
                 f"Aguardando {espera:.1f}s antes de tentar novamente."
@@ -205,11 +221,6 @@ def linha_tem_dados(linha):
 
 
 def remover_linhas_vazias_base(dados, nome_bloco=""):
-    """
-    Remove linhas que ficariam vazias no destino.
-    A validação é feita nas colunas A:I.
-    """
-
     filtradas = []
     removidas = 0
 
@@ -222,9 +233,9 @@ def remover_linhas_vazias_base(dados, nome_bloco=""):
             removidas += 1
 
     if nome_bloco:
-        print(f"Linhas vazias removidas no {nome_bloco}: {removidas}")
+        log(f"Linhas vazias removidas no {nome_bloco}: {removidas}")
     else:
-        print(f"Linhas vazias removidas: {removidas}")
+        log(f"Linhas vazias removidas: {removidas}")
 
     return filtradas
 
@@ -402,7 +413,7 @@ def escrever_em_blocos(
         linha_destino = linha_inicial + i
         celula_inicio = f"{coluna_inicial}{linha_destino}"
 
-        print(
+        log(
             f"Escrevendo bloco em {aba.title}!{celula_inicio} "
             f"({i + 1} até {min(i + tamanho_bloco, total)} de {total})"
         )
@@ -471,7 +482,7 @@ def atualizar_timestamp_final(aba_config):
     agora = datetime.now(ZoneInfo(TIMEZONE))
     timestamp = agora.strftime("%d/%m/%Y %H:%M:%S")
 
-    print(f"Atualizando timestamp final em {CONFIG_ABA}!{CELULA_TIMESTAMP_FINAL}: {timestamp}")
+    log(f"Atualizando timestamp final em {CONFIG_ABA}!{CELULA_TIMESTAMP_FINAL}: {timestamp}")
 
     executar_com_retry(
         lambda: aba_config.update(
@@ -484,38 +495,19 @@ def atualizar_timestamp_final(aba_config):
 
 
 # ==========================
-# OTIMIZAÇÃO DO BLOCO 1 - GERAL
+# BLOCO 1 OTIMIZADO - GERAL
 # ==========================
 
-def ordenar_geral_por_data_desc(planilha_destino, aba_destino):
-    print("Ordenando GERAL!A4:I por data decrescente...")
-
-    sheet_id = aba_destino.id
-
-    requests = [{
-        "sortRange": {
-            "range": {
-                "sheetId": sheet_id,
-                "startRowIndex": 3,
-                "endRowIndex": aba_destino.row_count,
-                "startColumnIndex": 0,
-                "endColumnIndex": QTD_COLUNAS_DESTINO_GERAL
-            },
-            "sortSpecs": [{
-                "dimensionIndex": 0,
-                "sortOrder": "DESCENDING"
-            }]
-        }
-    }]
-
-    executar_com_retry(
-        lambda: planilha_destino.batch_update({"requests": requests}),
-        descricao="ordenar GERAL por data"
-    )
-
-
 def localizar_bloco_data_geral(aba_destino, data_referencia):
-    print("Localizando bloco da data de referência na GERAL...")
+    """
+    Lê somente a coluna A da GERAL e encontra o bloco da data de referência.
+
+    Não ordena.
+    Não lê A:I inteiro.
+    Não regrava histórico inteiro.
+    """
+
+    log("Lendo somente GERAL!A4:A para localizar a data de referência...")
 
     valores_coluna_a = executar_com_retry(
         lambda: aba_destino.get(
@@ -551,12 +543,22 @@ def localizar_bloco_data_geral(aba_destino, data_referencia):
             primeira_linha_mais_antiga = numero_linha
 
     if linhas_data_referencia:
-        linha_inicio = min(linhas_data_referencia)
-        linha_fim = max(linhas_data_referencia)
+        linhas_ordenadas = sorted(linhas_data_referencia)
+
+        linha_inicio = linhas_ordenadas[0]
+        linha_fim = linhas_ordenadas[-1]
         quantidade = linha_fim - linha_inicio + 1
 
-        print(
-            f"Bloco existente encontrado na GERAL: "
+        quantidade_exata = len(linhas_ordenadas)
+
+        if quantidade != quantidade_exata:
+            log(
+                "Aviso: a data de referência aparece em linhas não contínuas na GERAL. "
+                "O script vai considerar o menor bloco entre a primeira e a última ocorrência."
+            )
+
+        log(
+            f"Bloco encontrado na GERAL para a data: "
             f"linhas {linha_inicio} até {linha_fim} ({quantidade} linhas)."
         )
 
@@ -576,9 +578,9 @@ def localizar_bloco_data_geral(aba_destino, data_referencia):
     if linha_insercao < 4:
         linha_insercao = 4
 
-    print(
-        f"Nenhum bloco existente para a data de referência. "
-        f"Nova inserção será feita a partir da linha {linha_insercao}."
+    log(
+        f"Nenhum bloco existente para a data. "
+        f"Inserção será feita a partir da linha {linha_insercao}."
     )
 
     return {
@@ -645,9 +647,19 @@ def deletar_intervalo_celulas(planilha_destino, aba_destino, linha_inicio, linha
     )
 
 
-def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data_referencia):
-    ordenar_geral_por_data_desc(planilha_destino, aba_destino)
+def limpar_intervalo_geral(aba_destino, linha_inicio, linha_fim):
+    if linha_inicio is None or linha_fim is None or linha_fim < linha_inicio:
+        return
 
+    intervalo = f"A{linha_inicio}:I{linha_fim}"
+
+    executar_com_retry(
+        lambda: aba_destino.batch_clear([intervalo]),
+        descricao=f"limpar GERAL!{intervalo}"
+    )
+
+
+def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data_referencia):
     info_bloco = localizar_bloco_data_geral(
         aba_destino=aba_destino,
         data_referencia=data_referencia
@@ -656,12 +668,15 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
     qtd_nova = len(dados_novos)
     qtd_antiga = info_bloco["quantidade"]
 
+    log(f"GERAL - quantidade antiga da data: {qtd_antiga}")
+    log(f"GERAL - quantidade nova da data: {qtd_nova}")
+
     if qtd_antiga == 0 and qtd_nova == 0:
-        print("Nada para substituir na GERAL.")
+        log("Nada para substituir na GERAL.")
         return
 
     if qtd_antiga > 0 and qtd_nova == 0:
-        print("Removendo bloco antigo da data, pois não há dados novos.")
+        log("Removendo bloco antigo da data, pois não há dados novos.")
         deletar_intervalo_celulas(
             planilha_destino=planilha_destino,
             aba_destino=aba_destino,
@@ -672,9 +687,9 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
         return
 
     if qtd_antiga == 0 and qtd_nova > 0:
-        print(f"Inserindo novo bloco com {qtd_nova} linhas na GERAL.")
-
         linha_insercao = info_bloco["linha_insercao"]
+
+        log(f"Inserindo novo bloco com {qtd_nova} linhas na GERAL a partir da linha {linha_insercao}.")
 
         inserir_intervalo_celulas(
             planilha_destino=planilha_destino,
@@ -699,10 +714,7 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
         diferenca = qtd_nova - qtd_antiga
         linha_inserir = linha_inicio + qtd_antiga
 
-        print(
-            f"Bloco novo maior que o antigo. "
-            f"Inserindo {diferenca} linhas/células extras na GERAL."
-        )
+        log(f"Bloco novo maior. Inserindo {diferenca} linhas/células extras na GERAL.")
 
         inserir_intervalo_celulas(
             planilha_destino=planilha_destino,
@@ -717,10 +729,7 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
         linha_delete_inicio = linha_inicio + qtd_nova
         linha_delete_fim = linha_inicio + qtd_antiga - 1
 
-        print(
-            f"Bloco novo menor que o antigo. "
-            f"Removendo {diferenca} linhas/células antigas da GERAL."
-        )
+        log(f"Bloco novo menor. Removendo {diferenca} linhas/células antigas da GERAL.")
 
         deletar_intervalo_celulas(
             planilha_destino=planilha_destino,
@@ -730,14 +739,18 @@ def substituir_bloco_data_geral(planilha_destino, aba_destino, dados_novos, data
             qtd_colunas=QTD_COLUNAS_DESTINO_GERAL
         )
 
-    print(f"Atualizando somente o bloco da data na GERAL a partir da linha {linha_inicio}.")
+    if dados_novos:
+        linha_fim_nova = linha_inicio + len(dados_novos) - 1
+        limpar_intervalo_geral(aba_destino, linha_inicio, linha_fim_nova)
 
-    escrever_em_blocos(
-        aba=aba_destino,
-        dados=dados_novos,
-        linha_inicial=linha_inicio,
-        coluna_inicial="A"
-    )
+        log(f"Atualizando somente o bloco da data na GERAL a partir da linha {linha_inicio}.")
+
+        escrever_em_blocos(
+            aba=aba_destino,
+            dados=dados_novos,
+            linha_inicial=linha_inicio,
+            coluna_inicial="A"
+        )
 
 
 # ==========================
@@ -762,10 +775,10 @@ def ler_dados_google_sheet(gc, origem_id, aba_origem_nome, cache_planilhas, cach
     chave_cache = (origem_id, aba_origem_nome)
 
     if chave_cache in cache_dados:
-        print(f"Usando cache Google Sheets: {origem_id} | Aba: {aba_origem_nome}")
+        log(f"Usando cache Google Sheets: {origem_id} | Aba: {aba_origem_nome}")
         return cache_dados[chave_cache]
 
-    print(f"Lendo origem Google Sheets: {origem_id} | Aba: {aba_origem_nome}")
+    log(f"Lendo origem Google Sheets: {origem_id} | Aba: {aba_origem_nome}")
 
     try:
         planilha_origem = obter_planilha_origem(
@@ -800,13 +813,13 @@ def ler_dados_google_sheet(gc, origem_id, aba_origem_nome, cache_planilhas, cach
         return dados_origem
 
     except WorksheetNotFound:
-        print(f"Aba não encontrada na origem {origem_id}: {aba_origem_nome}")
+        log(f"Aba não encontrada na origem {origem_id}: {aba_origem_nome}")
         cache_dados[chave_cache] = []
         return []
 
     except Exception as erro:
-        print(f"Erro ao processar a origem {origem_id}, aba {aba_origem_nome}: {erro}")
-        print("Essa origem será ignorada e o processo seguirá para a próxima.")
+        log(f"Erro ao processar a origem {origem_id}, aba {aba_origem_nome}: {erro}")
+        log("Essa origem será ignorada e o processo seguirá para a próxima.")
         cache_dados[chave_cache] = []
         return []
 
@@ -869,7 +882,7 @@ def ler_dados_origem_com_filtro_data(
         for linha in dados_filtrados
     ]
 
-    print(f"Linhas encontradas nessa origem: {len(dados_selecionados)}")
+    log(f"Linhas encontradas nessa origem: {len(dados_selecionados)}")
 
     return dados_selecionados
 
@@ -894,7 +907,7 @@ def ler_dados_origem_sem_filtro_com_extra(
     for linha in dados_origem:
         dados.append(selecionar_colunas_origem_com_extra(linha))
 
-    print(f"Linhas encontradas nessa origem: {len(dados)}")
+    log(f"Linhas encontradas nessa origem: {len(dados)}")
 
     return dados
 
@@ -904,7 +917,7 @@ def ler_dados_origem_sem_filtro_com_extra(
 # ==========================
 
 def listar_arquivos_csv_drive(drive_service, pasta_id):
-    print(f"Buscando arquivos CSV na pasta Drive: {pasta_id}")
+    log(f"Buscando arquivos CSV na pasta Drive: {pasta_id}")
 
     arquivos = []
     page_token = None
@@ -937,7 +950,7 @@ def listar_arquivos_csv_drive(drive_service, pasta_id):
 
     arquivos = sorted(arquivos, key=lambda x: x.get("name", ""))
 
-    print(f"Quantidade de CSVs encontrados: {len(arquivos)}")
+    log(f"Quantidade de CSVs encontrados: {len(arquivos)}")
 
     return arquivos
 
@@ -1000,8 +1013,8 @@ def ler_linhas_csv(texto_csv):
 
 
 def ler_dados_csvs_bloco_3(drive_service):
-    print("")
-    print("Lendo CSVs do Drive para o Bloco 3...")
+    log("")
+    log("Lendo CSVs do Drive para o Bloco 3...")
 
     arquivos_csv = listar_arquivos_csv_drive(
         drive_service=drive_service,
@@ -1014,7 +1027,7 @@ def ler_dados_csvs_bloco_3(drive_service):
         arquivo_id = arquivo.get("id")
         arquivo_nome = arquivo.get("name")
 
-        print(f"Lendo CSV: {arquivo_nome}")
+        log(f"Lendo CSV: {arquivo_nome}")
 
         try:
             texto_csv = baixar_csv_drive(
@@ -1037,15 +1050,15 @@ def ler_dados_csvs_bloco_3(drive_service):
                 dados.append(linha_destino)
                 linhas_aproveitadas += 1
 
-            print(f"Linhas lidas do CSV {arquivo_nome}: {len(linhas_csv)}")
-            print(f"Linhas aproveitadas do CSV {arquivo_nome}: {linhas_aproveitadas}")
-            print(f"Linhas vazias ignoradas do CSV {arquivo_nome}: {linhas_vazias_selecao}")
+            log(f"Linhas lidas do CSV {arquivo_nome}: {len(linhas_csv)}")
+            log(f"Linhas aproveitadas do CSV {arquivo_nome}: {linhas_aproveitadas}")
+            log(f"Linhas vazias ignoradas do CSV {arquivo_nome}: {linhas_vazias_selecao}")
 
         except Exception as erro:
-            print(f"Erro ao processar CSV {arquivo_nome}: {erro}")
-            print("Esse CSV será ignorado e o processo seguirá para o próximo.")
+            log(f"Erro ao processar CSV {arquivo_nome}: {erro}")
+            log("Esse CSV será ignorado e o processo seguirá para o próximo.")
 
-    print(f"Total de linhas vindas dos CSVs no Bloco 3: {len(dados)}")
+    log(f"Total de linhas vindas dos CSVs no Bloco 3: {len(dados)}")
 
     return dados
 
@@ -1062,10 +1075,10 @@ def executar_bloco_1(
     cache_planilhas,
     cache_dados
 ):
-    print("")
-    print("======================================")
-    print("INICIANDO BLOCO 1 - PLAN_PRINCIPAL > GERAL")
-    print("======================================")
+    log("")
+    log("======================================")
+    log("INICIANDO BLOCO 1 - PLAN_PRINCIPAL > GERAL")
+    log("======================================")
 
     aba_destino = executar_com_retry(
         lambda: planilha_destino.worksheet("GERAL"),
@@ -1088,7 +1101,7 @@ def executar_bloco_1(
             f"da aba {CONFIG_ABA}. Valor encontrado: {valor_data_referencia}"
         )
 
-    print(f"Data de referência considerada no Bloco 1: {data_referencia.strftime('%d/%m/%Y')}")
+    log(f"Data de referência considerada no Bloco 1: {data_referencia.strftime('%d/%m/%Y')}")
 
     dados_data_referencia = []
 
@@ -1104,7 +1117,7 @@ def executar_bloco_1(
 
         dados_data_referencia.extend(dados_origem)
 
-    print(f"Total bruto de linhas consolidadas no Bloco 1: {len(dados_data_referencia)}")
+    log(f"Total bruto de linhas consolidadas no Bloco 1: {len(dados_data_referencia)}")
 
     dados_data_referencia = [
         linha
@@ -1112,14 +1125,14 @@ def executar_bloco_1(
         if linha_tem_dados(linha)
     ]
 
-    print(f"Total final de linhas úteis no Bloco 1: {len(dados_data_referencia)}")
+    log(f"Total final de linhas úteis no Bloco 1: {len(dados_data_referencia)}")
 
     dados_data_referencia = [
         preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_GERAL)
         for linha in dados_data_referencia
     ]
 
-    print("Aplicando formatação na aba GERAL...")
+    log("Aplicando formatação na aba GERAL...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
@@ -1130,7 +1143,7 @@ def executar_bloco_1(
         data_referencia=data_referencia
     )
 
-    print("Bloco 1 finalizado com sucesso.")
+    log("Bloco 1 finalizado com sucesso.")
 
 
 # ==========================
@@ -1144,10 +1157,10 @@ def executar_bloco_2(
     cache_planilhas,
     cache_dados
 ):
-    print("")
-    print("======================================")
-    print("INICIANDO BLOCO 2 - REPROGRAMADAS > REPROGRAMADAS")
-    print("======================================")
+    log("")
+    log("======================================")
+    log("INICIANDO BLOCO 2 - REPROGRAMADAS > REPROGRAMADAS")
+    log("======================================")
 
     aba_destino = executar_com_retry(
         lambda: planilha_destino.worksheet("REPROGRAMADAS"),
@@ -1167,28 +1180,28 @@ def executar_bloco_2(
 
         dados.extend(dados_origem)
 
-    print(f"Total bruto de linhas consolidadas no Bloco 2: {len(dados)}")
+    log(f"Total bruto de linhas consolidadas no Bloco 2: {len(dados)}")
 
     dados = remover_linhas_vazias_base(
         dados=dados,
         nome_bloco="Bloco 2"
     )
 
-    print(f"Total final de linhas úteis no Bloco 2: {len(dados)}")
+    log(f"Total final de linhas úteis no Bloco 2: {len(dados)}")
 
     dados = [
         preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_COMPLETO)
         for linha in dados
     ]
 
-    print("Limpando A4:K da aba REPROGRAMADAS...")
+    log("Limpando A4:K da aba REPROGRAMADAS...")
 
     executar_com_retry(
         lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO]),
         descricao="limpar REPROGRAMADAS!A4:K"
     )
 
-    print("Aplicando formatação na aba REPROGRAMADAS...")
+    log("Aplicando formatação na aba REPROGRAMADAS...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
@@ -1196,7 +1209,7 @@ def executar_bloco_2(
         ultima_linha_necessaria = 3 + len(dados)
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
 
-        print("Gravando dados A:K na aba REPROGRAMADAS...")
+        log("Gravando dados A:K na aba REPROGRAMADAS...")
 
         escrever_em_blocos(
             aba=aba_destino,
@@ -1205,9 +1218,9 @@ def executar_bloco_2(
             coluna_inicial="A"
         )
     else:
-        print("Nenhum dado para gravar na aba REPROGRAMADAS.")
+        log("Nenhum dado para gravar na aba REPROGRAMADAS.")
 
-    print("Bloco 2 finalizado com sucesso.")
+    log("Bloco 2 finalizado com sucesso.")
 
 
 # ==========================
@@ -1222,10 +1235,10 @@ def executar_bloco_3(
     cache_planilhas,
     cache_dados
 ):
-    print("")
-    print("======================================")
-    print("INICIANDO BLOCO 3 - CSVs + PLAN_PRINCIPAL > PLAN_PRINCIPAL")
-    print("======================================")
+    log("")
+    log("======================================")
+    log("INICIANDO BLOCO 3 - CSVs + PLAN_PRINCIPAL > PLAN_PRINCIPAL")
+    log("======================================")
 
     aba_destino = executar_com_retry(
         lambda: planilha_destino.worksheet("PLAN_PRINCIPAL"),
@@ -1240,8 +1253,8 @@ def executar_bloco_3(
 
     dados.extend(dados_csv)
 
-    print("")
-    print("Lendo planilhas Google Sheets para o Bloco 3...")
+    log("")
+    log("Lendo planilhas Google Sheets para o Bloco 3...")
 
     for origem_id in ids_origem:
         dados_origem = ler_dados_origem_sem_filtro_com_extra(
@@ -1254,28 +1267,28 @@ def executar_bloco_3(
 
         dados.extend(dados_origem)
 
-    print(f"Total bruto de linhas consolidadas no Bloco 3: {len(dados)}")
+    log(f"Total bruto de linhas consolidadas no Bloco 3: {len(dados)}")
 
     dados = remover_linhas_vazias_base(
         dados=dados,
         nome_bloco="Bloco 3"
     )
 
-    print(f"Total final de linhas úteis no Bloco 3: {len(dados)}")
+    log(f"Total final de linhas úteis no Bloco 3: {len(dados)}")
 
     dados = [
         preparar_linha_para_envio(linha, QTD_COLUNAS_DESTINO_COMPLETO)
         for linha in dados
     ]
 
-    print("Limpando A4:K da aba PLAN_PRINCIPAL...")
+    log("Limpando A4:K da aba PLAN_PRINCIPAL...")
 
     executar_com_retry(
         lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO]),
         descricao="limpar PLAN_PRINCIPAL!A4:K"
     )
 
-    print("Aplicando formatação na aba PLAN_PRINCIPAL...")
+    log("Aplicando formatação na aba PLAN_PRINCIPAL...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
@@ -1283,7 +1296,7 @@ def executar_bloco_3(
         ultima_linha_necessaria = 3 + len(dados)
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
 
-        print("Gravando dados A:K na aba PLAN_PRINCIPAL...")
+        log("Gravando dados A:K na aba PLAN_PRINCIPAL...")
 
         escrever_em_blocos(
             aba=aba_destino,
@@ -1292,9 +1305,9 @@ def executar_bloco_3(
             coluna_inicial="A"
         )
     else:
-        print("Nenhum dado para gravar na aba PLAN_PRINCIPAL.")
+        log("Nenhum dado para gravar na aba PLAN_PRINCIPAL.")
 
-    print("Bloco 3 finalizado com sucesso.")
+    log("Bloco 3 finalizado com sucesso.")
 
 
 # ==========================
@@ -1302,6 +1315,8 @@ def executar_bloco_3(
 # ==========================
 
 def main():
+    log("Iniciando compilador...")
+
     gc, drive_service = autenticar_google()
 
     cache_planilhas = {}
@@ -1324,7 +1339,7 @@ def main():
             f"Nenhum ID de planilha de origem encontrado no intervalo {CONFIG_ABA}!{RANGE_IDS_ORIGEM}."
         )
 
-    print(f"Quantidade de planilhas de origem encontradas: {len(ids_origem)}")
+    log(f"Quantidade de planilhas de origem encontradas: {len(ids_origem)}")
 
     executar_bloco_1(
         gc=gc,
@@ -1354,8 +1369,8 @@ def main():
 
     atualizar_timestamp_final(aba_config)
 
-    print("")
-    print("Processo completo finalizado com sucesso.")
+    log("")
+    log("Processo completo finalizado com sucesso.")
 
 
 if __name__ == "__main__":
