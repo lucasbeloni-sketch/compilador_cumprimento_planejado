@@ -944,10 +944,6 @@ def bloco0_valor_texto(valor):
 
 
 def bloco0_extrair_coluna_h(valor_c):
-    """
-    H:
-    Extrai os números iniciais de C após remover "B-".
-    """
     texto = bloco0_valor_texto(valor_c).replace("B-", "").strip()
 
     if not texto:
@@ -971,12 +967,6 @@ def bloco0_extrair_coluna_h(valor_c):
 
 
 def bloco0_formatar_coluna_j(valor_h):
-    """
-    J:
-    Se H tem 7 caracteres: B-&H
-    Se H tem 6 caracteres: B-0&H
-    Se H tem 5 caracteres: B-00&H
-    """
     h = bloco0_valor_texto(valor_h)
 
     if not h:
@@ -997,10 +987,6 @@ def bloco0_formatar_coluna_j(valor_h):
 
 
 def bloco0_converter_data_para_serial(valor_data):
-    """
-    Converte a data da coluna F para número serial do Google Sheets,
-    equivalente ao F * 1 da fórmula.
-    """
     if valor_data is None:
         return ""
 
@@ -1039,22 +1025,6 @@ def bloco0_converter_data_para_serial(valor_data):
 
 
 def bloco0_montar_colunas_h_i_j_k(df_sheets):
-    """
-    Gera H, I, J e K como valores fixos.
-
-    A = centro_servico
-    B = Nota
-    C = cod_pep_obra
-    D = equipe
-    E = obs_servico
-    F = dta_exec_srv
-    G = total_servicos
-
-    H = número extraído de C removendo "B-"
-    I = H & F & D, exceto se H, F e D estiverem vazios
-    J = código B- formatado com base no tamanho de H
-    K = J & F*1 & D
-    """
     col_h = []
     col_i = []
     col_j = []
@@ -1120,15 +1090,33 @@ def bloco0_upload_to_sheets(sheets_service, df):
         f"{BLOCO0_SHEET_NAME}!A3:K"
     )
 
-    executar_com_retry(
-        lambda: sheets_service.spreadsheets().values().update(
-            spreadsheetId=BLOCO0_SPREADSHEET_ID,
-            range=f"{BLOCO0_SHEET_NAME}!A3",
-            valueInputOption="USER_ENTERED",
-            body={"values": values}
-        ).execute(),
-        descricao=f"gravar {BLOCO0_SHEET_NAME}!A3:K"
-    )
+    if not values:
+        log("[BLOCO 0] Nenhum dado para gravar em BD_ConsultaServ.")
+    else:
+        total = len(values)
+        tamanho_bloco = TAMANHO_BLOCO_ESCRITA
+
+        for i in range(0, total, tamanho_bloco):
+            bloco = values[i:i + tamanho_bloco]
+            linha_inicio = 3 + i
+            range_inicio = f"{BLOCO0_SHEET_NAME}!A{linha_inicio}"
+
+            log(
+                f"[BLOCO 0] Gravando BD_ConsultaServ em blocos: "
+                f"{i + 1} até {min(i + tamanho_bloco, total)} de {total}"
+            )
+
+            executar_com_retry(
+                lambda bloco=bloco, range_inicio=range_inicio: sheets_service.spreadsheets().values().update(
+                    spreadsheetId=BLOCO0_SPREADSHEET_ID,
+                    range=range_inicio,
+                    valueInputOption="USER_ENTERED",
+                    body={"values": bloco}
+                ).execute(),
+                descricao=f"gravar {range_inicio}"
+            )
+
+            time.sleep(PAUSA_APOS_ESCRITA)
 
     timestamp = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d/%m/%Y %H:%M:%S")
 
