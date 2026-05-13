@@ -825,220 +825,6 @@ def bloco0_to_number_ptbr(value):
         return 0.0
 
 
-def bloco0_normalizar_texto(valor):
-    if valor is None:
-        return ""
-
-    if isinstance(valor, float):
-        if valor.is_integer():
-            return str(int(valor)).strip()
-        return str(valor).strip()
-
-    if isinstance(valor, int):
-        return str(valor).strip()
-
-    texto = str(valor).strip()
-
-    if texto.lower() in ("nan", "none"):
-        return ""
-
-    return texto
-
-
-def bloco0_numero_para_chave(valor):
-    """
-    Simula o a*1 da fórmula:
-    chave = c & a*1 & b
-    """
-    if valor is None:
-        return ""
-
-    if isinstance(valor, (int, float)):
-        numero = float(valor)
-        return str(int(numero)) if numero.is_integer() else str(numero)
-
-    texto = str(valor).strip()
-
-    if texto == "":
-        return ""
-
-    data_valor = converter_para_data(texto)
-
-    if data_valor:
-        serial = data_para_serial_google_sheets(data_valor)
-        return str(serial)
-
-    texto_num = texto.replace(" ", "")
-
-    if "," in texto_num:
-        texto_num = texto_num.replace(".", "").replace(",", ".")
-
-    try:
-        numero = float(texto_num)
-        return str(int(numero)) if numero.is_integer() else str(numero)
-    except Exception:
-        return texto
-
-
-def bloco0_montar_mapa_bd_serv_gpm(sheets_service):
-    """
-    Lê BD_Serv_GPM e monta mapas para simular SOMASES e PROCX.
-
-    Base usada:
-    BD_Serv_GPM!D:K
-
-    Índices relativos:
-    D = 0
-    E = 1
-    F = 2
-    G = 3
-    H = 4
-    I = 5
-    J = 6
-    K = 7
-    """
-
-    log("[BLOCO 0] Lendo BD_Serv_GPM!D2:K para calcular J:N...")
-
-    resp = executar_com_retry(
-        lambda: sheets_service.spreadsheets().values().get(
-            spreadsheetId=BLOCO0_SPREADSHEET_ID,
-            range="BD_Serv_GPM!D2:K",
-            valueRenderOption="FORMATTED_VALUE"
-        ).execute(),
-        descricao="ler BD_Serv_GPM!D2:K"
-    )
-
-    linhas = resp.get("values", [])
-
-    soma_por_h_d_f = {}
-    soma_por_j_d_f = {}
-    soma_por_d_f = {}
-    procx_i_para_e = {}
-    procx_k_para_e = {}
-
-    for linha in linhas:
-        linha = normalizar_linha(linha, 8)
-
-        valor_d = bloco0_normalizar_texto(linha[0])
-        valor_e = linha[1]
-        valor_f = bloco0_normalizar_texto(linha[2])
-        valor_g = bloco0_to_number_ptbr(linha[3])
-        valor_h = bloco0_normalizar_texto(linha[4])
-        valor_i = bloco0_normalizar_texto(linha[5])
-        valor_j = bloco0_normalizar_texto(linha[6])
-        valor_k = bloco0_normalizar_texto(linha[7])
-
-        chave_h = (valor_h, valor_d, valor_f)
-        chave_j = (valor_j, valor_d, valor_f)
-        chave_df = (valor_d, valor_f)
-
-        soma_por_h_d_f[chave_h] = soma_por_h_d_f.get(chave_h, 0.0) + valor_g
-        soma_por_j_d_f[chave_j] = soma_por_j_d_f.get(chave_j, 0.0) + valor_g
-        soma_por_d_f[chave_df] = soma_por_d_f.get(chave_df, 0.0) + valor_g
-
-        if valor_i and valor_i not in procx_i_para_e:
-            procx_i_para_e[valor_i] = valor_e
-
-        if valor_k and valor_k not in procx_k_para_e:
-            procx_k_para_e[valor_k] = valor_e
-
-    log(f"[BLOCO 0] Linhas lidas da BD_Serv_GPM: {len(linhas)}")
-
-    return {
-        "soma_por_h_d_f": soma_por_h_d_f,
-        "soma_por_j_d_f": soma_por_j_d_f,
-        "soma_por_d_f": soma_por_d_f,
-        "procx_i_para_e": procx_i_para_e,
-        "procx_k_para_e": procx_k_para_e,
-    }
-
-
-def bloco0_calcular_colunas_j_n(valores_a_i, mapas_bd_serv_gpm):
-    """
-    Calcula J:N como valores, simulando as fórmulas informadas.
-
-    Entrada:
-    valores_a_i = linhas com A:I
-
-    Saída:
-    lista com J:N
-    """
-
-    resultado = []
-
-    soma_por_h_d_f = mapas_bd_serv_gpm["soma_por_h_d_f"]
-    soma_por_j_d_f = mapas_bd_serv_gpm["soma_por_j_d_f"]
-    soma_por_d_f = mapas_bd_serv_gpm["soma_por_d_f"]
-    procx_i_para_e = mapas_bd_serv_gpm["procx_i_para_e"]
-    procx_k_para_e = mapas_bd_serv_gpm["procx_k_para_e"]
-
-    for linha in valores_a_i:
-        linha = normalizar_linha(linha, 9)
-
-        a = bloco0_normalizar_texto(linha[0])
-        b = bloco0_normalizar_texto(linha[1])
-        c = bloco0_normalizar_texto(linha[2])
-        e_txt = linha[4]
-        f_txt = linha[5]
-        h = bloco0_normalizar_texto(linha[7])
-
-        if a == "":
-            resultado.append(["", "", "", "", ""])
-            continue
-
-        e_num = bloco0_to_number_ptbr(e_txt)
-        f_num = bloco0_to_number_ptbr(f_txt)
-
-        # Coluna J
-        if e_num == 0:
-            valor_j_calc = 0.0
-        else:
-            valor_j_calc = (
-                soma_por_h_d_f.get((c, b, a), 0.0)
-                + soma_por_j_d_f.get((c, b, a), 0.0)
-            )
-
-        # Coluna K
-        if valor_j_calc <= 0:
-            valor_k_calc = ""
-        elif h != "" and h != c:
-            valor_k_calc = 0
-        elif e_num > 0:
-            try:
-                valor_k_calc = valor_j_calc / e_num
-            except Exception:
-                valor_k_calc = 0
-        else:
-            valor_k_calc = 1
-
-        # Coluna L
-        valor_l_calc = soma_por_d_f.get((b, a), 0.0)
-
-        # Coluna M
-        try:
-            valor_m_calc = valor_l_calc / f_num if f_num != 0 else 0
-        except Exception:
-            valor_m_calc = 0
-
-        # Coluna N
-        chave_n = c + bloco0_numero_para_chave(a) + b
-        valor_n_calc = procx_i_para_e.get(chave_n, "-")
-
-        if valor_n_calc == "-":
-            valor_n_calc = procx_k_para_e.get(chave_n, "-")
-
-        resultado.append([
-            valor_j_calc,
-            valor_k_calc,
-            valor_l_calc,
-            valor_m_calc,
-            valor_n_calc
-        ])
-
-    return resultado
-
-
 def bloco0_extrair_data_string(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip()
 
@@ -1136,6 +922,180 @@ def bloco0_parse_date_por_arquivo(df: pd.DataFrame, col_data: str, col_arquivo: 
     return parsed_final
 
 
+def bloco0_valor_texto(valor):
+    if valor is None:
+        return ""
+
+    try:
+        if pd.isna(valor):
+            return ""
+    except Exception:
+        pass
+
+    if isinstance(valor, float):
+        if valor.is_integer():
+            return str(int(valor))
+        return str(valor)
+
+    if isinstance(valor, int):
+        return str(valor)
+
+    return str(valor).strip()
+
+
+def bloco0_extrair_coluna_h(valor_c):
+    """
+    H:
+    Extrai os números iniciais de C após remover "B-".
+    """
+    texto = bloco0_valor_texto(valor_c).replace("B-", "").strip()
+
+    if not texto:
+        return ""
+
+    match = re.search(r"^\d+", texto)
+
+    if match:
+        return match.group(0)
+
+    try:
+        numero = float(texto.replace(",", "."))
+
+        if numero.is_integer():
+            return str(int(numero))
+
+        return str(numero)
+
+    except Exception:
+        return ""
+
+
+def bloco0_formatar_coluna_j(valor_h):
+    """
+    J:
+    Se H tem 7 caracteres: B-&H
+    Se H tem 6 caracteres: B-0&H
+    Se H tem 5 caracteres: B-00&H
+    """
+    h = bloco0_valor_texto(valor_h)
+
+    if not h:
+        return ""
+
+    tamanho = len(h)
+
+    if tamanho == 7:
+        return f"B-{h}"
+
+    if tamanho == 6:
+        return f"B-0{h}"
+
+    if tamanho == 5:
+        return f"B-00{h}"
+
+    return ""
+
+
+def bloco0_converter_data_para_serial(valor_data):
+    """
+    Converte a data da coluna F para número serial do Google Sheets,
+    equivalente ao F * 1 da fórmula.
+    """
+    if valor_data is None:
+        return ""
+
+    try:
+        if pd.isna(valor_data):
+            return ""
+    except Exception:
+        pass
+
+    if isinstance(valor_data, (int, float)):
+        if float(valor_data).is_integer():
+            return str(int(valor_data))
+        return str(valor_data)
+
+    texto = bloco0_valor_texto(valor_data)
+
+    if not texto:
+        return ""
+
+    data_convertida = converter_para_data(texto)
+
+    if data_convertida:
+        serial = data_para_serial_google_sheets(data_convertida)
+        return str(serial)
+
+    try:
+        numero = float(texto.replace(",", "."))
+
+        if numero.is_integer():
+            return str(int(numero))
+
+        return str(numero)
+
+    except Exception:
+        return ""
+
+
+def bloco0_montar_colunas_h_i_j_k(df_sheets):
+    """
+    Gera H, I, J e K como valores fixos.
+
+    A = centro_servico
+    B = Nota
+    C = cod_pep_obra
+    D = equipe
+    E = obs_servico
+    F = dta_exec_srv
+    G = total_servicos
+
+    H = número extraído de C removendo "B-"
+    I = H & F & D, exceto se H, F e D estiverem vazios
+    J = código B- formatado com base no tamanho de H
+    K = J & F*1 & D
+    """
+    col_h = []
+    col_i = []
+    col_j = []
+    col_k = []
+
+    for _, row in df_sheets.iterrows():
+        valor_c = row.iloc[2] if len(row) > 2 else ""
+        valor_d = row.iloc[3] if len(row) > 3 else ""
+        valor_f = row.iloc[5] if len(row) > 5 else ""
+
+        h = bloco0_extrair_coluna_h(valor_c)
+
+        d_txt = bloco0_valor_texto(valor_d)
+        f_txt = bloco0_valor_texto(valor_f)
+
+        if h == "" and f_txt == "" and d_txt == "":
+            i = ""
+        else:
+            i = h + f_txt + d_txt
+
+        j = bloco0_formatar_coluna_j(h)
+
+        if h == "":
+            k = ""
+        else:
+            serial_f = bloco0_converter_data_para_serial(valor_f)
+            k = j + serial_f + d_txt
+
+        col_h.append(h)
+        col_i.append(i)
+        col_j.append(j)
+        col_k.append(k)
+
+    df_sheets["H"] = col_h
+    df_sheets["I"] = col_i
+    df_sheets["J"] = col_j
+    df_sheets["K"] = col_k
+
+    return df_sheets
+
+
 def bloco0_clear_range(sheets_service, spreadsheet_id, range_):
     executar_com_retry(
         lambda: sheets_service.spreadsheets().values().clear(
@@ -1147,55 +1107,28 @@ def bloco0_clear_range(sheets_service, spreadsheet_id, range_):
 
 
 def bloco0_upload_to_sheets(sheets_service, df):
-    """
-    Cola os dados do Bloco 0 em BD_ConsultaServ!A4:I
-    e calcula J:N como valores, sem fórmulas.
-    """
-
-    df_sheets = df.copy()
+    df_sheets = df.iloc[:, :7].copy()
     df_sheets = df_sheets.fillna("")
 
-    # Garante 9 colunas para colar em A:I
-    while df_sheets.shape[1] < 9:
-        df_sheets[f"col_extra_{df_sheets.shape[1] + 1}"] = ""
+    df_sheets = bloco0_montar_colunas_h_i_j_k(df_sheets)
 
-    df_sheets = df_sheets.iloc[:, :9].copy()
-
-    valores_a_i = df_sheets.values.tolist()
-
-    mapas_bd_serv_gpm = bloco0_montar_mapa_bd_serv_gpm(sheets_service)
-
-    valores_j_n = bloco0_calcular_colunas_j_n(
-        valores_a_i=valores_a_i,
-        mapas_bd_serv_gpm=mapas_bd_serv_gpm
-    )
+    values = df_sheets.values.tolist()
 
     bloco0_clear_range(
         sheets_service,
         BLOCO0_SPREADSHEET_ID,
-        f"{BLOCO0_SHEET_NAME}!A4:N"
+        f"{BLOCO0_SHEET_NAME}!A3:K"
     )
 
-    if valores_a_i:
-        executar_com_retry(
-            lambda: sheets_service.spreadsheets().values().update(
-                spreadsheetId=BLOCO0_SPREADSHEET_ID,
-                range=f"{BLOCO0_SHEET_NAME}!A4",
-                valueInputOption="USER_ENTERED",
-                body={"values": valores_a_i}
-            ).execute(),
-            descricao=f"gravar {BLOCO0_SHEET_NAME}!A4:I"
-        )
-
-        executar_com_retry(
-            lambda: sheets_service.spreadsheets().values().update(
-                spreadsheetId=BLOCO0_SPREADSHEET_ID,
-                range=f"{BLOCO0_SHEET_NAME}!J4",
-                valueInputOption="USER_ENTERED",
-                body={"values": valores_j_n}
-            ).execute(),
-            descricao=f"gravar {BLOCO0_SHEET_NAME}!J4:N"
-        )
+    executar_com_retry(
+        lambda: sheets_service.spreadsheets().values().update(
+            spreadsheetId=BLOCO0_SPREADSHEET_ID,
+            range=f"{BLOCO0_SHEET_NAME}!A3",
+            valueInputOption="USER_ENTERED",
+            body={"values": values}
+        ).execute(),
+        descricao=f"gravar {BLOCO0_SHEET_NAME}!A3:K"
+    )
 
     timestamp = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d/%m/%Y %H:%M:%S")
 
