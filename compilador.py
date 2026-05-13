@@ -337,6 +337,78 @@ def calcular_extras_geral(dados_geral, mapa_plan_principal, mapa_reprogramadas):
     return extras
 
 
+def atualizar_lookup_geral_todas_linhas(
+    aba_destino,
+    mapa_plan_principal,
+    mapa_reprogramadas
+):
+    """
+    Atualiza GERAL!O:Q para todas as linhas existentes da aba GERAL.
+
+    O:P = busca pela chave Q primeiro em PLAN_PRINCIPAL, depois em REPROGRAMADAS.
+    Q = A & B & C & E
+
+    Tudo é gravado como valor, sem fórmula.
+    """
+
+    log("Atualizando GERAL!O:Q para todas as linhas da aba GERAL...")
+
+    dados_geral = executar_com_retry(
+        lambda: aba_destino.get(
+            "A4:E",
+            value_render_option="UNFORMATTED_VALUE"
+        ),
+        descricao="ler GERAL!A4:E para atualizar O:Q"
+    )
+
+    time.sleep(PAUSA_APOS_LEITURA)
+
+    dados_geral = [
+        normalizar_linha(linha, 5)
+        for linha in dados_geral
+    ]
+
+    ultima_linha_util = 0
+
+    for i, linha in enumerate(dados_geral):
+        if linha_tem_dados(linha):
+            ultima_linha_util = i + 1
+
+    if ultima_linha_util == 0:
+        log("Nenhuma linha útil encontrada na GERAL para atualizar O:Q.")
+
+        executar_com_retry(
+            lambda: aba_destino.batch_clear(["O4:Q"]),
+            descricao="limpar GERAL!O4:Q"
+        )
+
+        return
+
+    dados_geral = dados_geral[:ultima_linha_util]
+
+    extras_o_p_q = calcular_extras_geral(
+        dados_geral=dados_geral,
+        mapa_plan_principal=mapa_plan_principal,
+        mapa_reprogramadas=mapa_reprogramadas
+    )
+
+    log(f"Total de linhas que serão atualizadas em GERAL!O:Q: {len(extras_o_p_q)}")
+
+    executar_com_retry(
+        lambda: aba_destino.batch_clear(["O4:Q"]),
+        descricao="limpar GERAL!O4:Q"
+    )
+
+    escrever_em_blocos(
+        aba=aba_destino,
+        dados=extras_o_p_q,
+        linha_inicial=4,
+        coluna_inicial="O"
+    )
+
+    log("Atualização completa de GERAL!O:Q finalizada.")
+
+
 def remover_linhas_vazias_base(dados, nome_bloco=""):
     filtradas = []
     removidas = 0
@@ -1460,6 +1532,12 @@ def executar_bloco_1(
         dados_novos=dados_data_referencia,
         extras_o_p_q=extras_o_p_q,
         data_referencia=data_referencia
+    )
+
+    atualizar_lookup_geral_todas_linhas(
+        aba_destino=aba_destino,
+        mapa_plan_principal=mapa_plan_principal,
+        mapa_reprogramadas=mapa_reprogramadas
     )
 
     log("Bloco 1 finalizado com sucesso.")
