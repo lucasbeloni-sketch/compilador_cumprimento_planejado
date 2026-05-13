@@ -53,8 +53,6 @@ QTD_COLUNAS_DESTINO_COMPLETO_COM_CHAVE = 12
 
 DESTINO_RANGE_COMPLETO_COM_CHAVE = "A4:L"
 
-BD_SERV_GPM_ABA = "BD_Serv_GPM"
-
 TAMANHO_BLOCO_ESCRITA = 10000
 
 PAUSA_APOS_LEITURA = 0.5
@@ -273,6 +271,63 @@ def valor_para_chave(valor):
     return str(valor)
 
 
+def texto_chave(valor):
+    if valor is None:
+        return ""
+
+    try:
+        if pd.isna(valor):
+            return ""
+    except Exception:
+        pass
+
+    if isinstance(valor, float):
+        if valor.is_integer():
+            return str(int(valor))
+        return str(valor)
+
+    if isinstance(valor, int):
+        return str(valor)
+
+    return str(valor).strip()
+
+
+def numero_calculo(valor):
+    if valor is None:
+        return 0.0
+
+    try:
+        if pd.isna(valor):
+            return 0.0
+    except Exception:
+        pass
+
+    if isinstance(valor, (int, float)):
+        return float(valor)
+
+    texto = str(valor).strip()
+
+    if texto == "":
+        return 0.0
+
+    texto = texto.replace("R$", "")
+    texto = texto.replace(" ", "")
+    texto = texto.replace("\u00a0", "")
+
+    if "," in texto and "." in texto:
+        if texto.rfind(",") > texto.rfind("."):
+            texto = texto.replace(".", "").replace(",", ".")
+        else:
+            texto = texto.replace(",", "")
+    elif "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+
+    try:
+        return float(texto)
+    except Exception:
+        return 0.0
+
+
 def calcular_chave_linha(linha):
     linha = normalizar_linha(linha, max(len(linha), 5))
 
@@ -344,6 +399,259 @@ def calcular_extras_geral(dados_geral, mapa_plan_principal, mapa_reprogramadas):
     return extras
 
 
+def data_para_chave_serial(valor):
+    if valor is None:
+        return ""
+
+    try:
+        if pd.isna(valor):
+            return ""
+    except Exception:
+        pass
+
+    if isinstance(valor, (int, float)):
+        if float(valor).is_integer():
+            return str(int(valor))
+        return str(valor)
+
+    data_valor = converter_para_data(valor)
+
+    if data_valor:
+        return str(data_para_serial_google_sheets(data_valor))
+
+    texto = str(valor).strip()
+
+    try:
+        numero = float(texto.replace(",", "."))
+
+        if numero.is_integer():
+            return str(int(numero))
+
+        return str(numero)
+    except Exception:
+        return texto
+
+
+def bloco0_construir_mapas_bd_consulta_serv(df_sheets):
+    """
+    Monta os mapas usados para calcular GERAL!J:N.
+
+    BD_ConsultaServ:
+    D = equipe
+    E = obs_servico
+    F = dta_exec_srv
+    G = total_servicos
+    H = código numérico extraído
+    J = código B- formatado
+    I = H & F & D
+    K = J & F*1 & D
+    """
+
+    mapas = {
+        "soma_h_data_equipe": {},
+        "soma_j_data_equipe": {},
+        "soma_data_equipe": {},
+        "busca_i": {},
+        "busca_k": {},
+    }
+
+    for _, row in df_sheets.iterrows():
+        equipe = texto_chave(row.iloc[3]) if len(row) > 3 else ""
+        obs_servico = texto_chave(row.iloc[4]) if len(row) > 4 else ""
+        data_exec = row.iloc[5] if len(row) > 5 else ""
+        total_servicos = numero_calculo(row.iloc[6]) if len(row) > 6 else 0.0
+
+        h = texto_chave(row.iloc[7]) if len(row) > 7 else ""
+        j = texto_chave(row.iloc[9]) if len(row) > 9 else ""
+
+        data_serial = data_para_chave_serial(data_exec)
+
+        if not data_serial or not equipe:
+            continue
+
+        chave_data_equipe = (data_serial, equipe)
+
+        mapas["soma_data_equipe"][chave_data_equipe] = (
+            mapas["soma_data_equipe"].get(chave_data_equipe, 0.0) + total_servicos
+        )
+
+        if h:
+            chave_h = (h, equipe, data_serial)
+
+            mapas["soma_h_data_equipe"][chave_h] = (
+                mapas["soma_h_data_equipe"].get(chave_h, 0.0) + total_servicos
+            )
+
+            chave_i = h + data_serial + equipe
+
+            if chave_i not in mapas["busca_i"]:
+                mapas["busca_i"][chave_i] = obs_servico
+
+        if j:
+            chave_j = (j, equipe, data_serial)
+
+            mapas["soma_j_data_equipe"][chave_j] = (
+                mapas["soma_j_data_equipe"].get(chave_j, 0.0) + total_servicos
+            )
+
+            chave_k = j + data_serial + equipe
+
+            if chave_k not in mapas["busca_k"]:
+                mapas["busca_k"][chave_k] = obs_servico
+
+    return mapas
+
+
+def calcular_metricas_geral_j_n(dados_geral, mapas_bd):
+    """
+    Calcula GERAL!J:N como valores fixos.
+
+    J = produção específica da obra/equipe/data
+    K = aderência J / E, com regra especial da coluna H
+    L = produção total da equipe/data
+    M = L / F
+    N = busca observação em BD_ConsultaServ pela chave C & A*1 & B
+    """
+
+    resultados = []
+
+    soma_h = mapas_bd.get("soma_h_data_equipe", {})
+    soma_j = mapas_bd.get("soma_j_data_equipe", {})
+    soma_total = mapas_bd.get("soma_data_equipe", {})
+    busca_i = mapas_bd.get("busca_i", {})
+    busca_k = mapas_bd.get("busca_k", {})
+
+    for linha in dados_geral:
+        linha = normalizar_linha(linha, 9)
+
+        a = linha[0]
+        b = texto_chave(linha[1])
+        c = texto_chave(linha[2])
+        e = numero_calculo(linha[4])
+        f = numero_calculo(linha[5])
+        h = texto_chave(linha[7])
+
+        if texto_chave(a) == "":
+            resultados.append(["", "", "", "", ""])
+            continue
+
+        data_serial = data_para_chave_serial(a)
+
+        # J
+        if e == 0:
+            valor_j = 0.0
+        else:
+            valor_j = (
+                soma_h.get((c, b, data_serial), 0.0)
+                + soma_j.get((c, b, data_serial), 0.0)
+            )
+
+        # K
+        if valor_j <= 0:
+            valor_k = ""
+        else:
+            if h != "" and h != c:
+                valor_k = 0
+            else:
+                if e > 0:
+                    valor_k = valor_j / e
+                else:
+                    valor_k = 1
+
+        # L
+        valor_l = soma_total.get((data_serial, b), 0.0)
+
+        # M
+        if f == 0:
+            valor_m = 0
+        else:
+            valor_m = valor_l / f
+
+        # N
+        chave_busca = c + data_serial + b
+
+        valor_n = busca_i.get(chave_busca)
+
+        if valor_n is None:
+            valor_n = busca_k.get(chave_busca, "-")
+
+        resultados.append([
+            valor_j,
+            valor_k,
+            valor_l,
+            valor_m,
+            valor_n
+        ])
+
+    return resultados
+
+
+def atualizar_metricas_geral_j_n_todas_linhas(
+    aba_destino,
+    mapas_bd
+):
+    """
+    Atualiza GERAL!J:N para todas as linhas existentes da aba GERAL.
+    Tudo é gravado como valor, sem fórmula.
+    """
+
+    log("Atualizando GERAL!J:N para todas as linhas da aba GERAL...")
+
+    dados_geral = executar_com_retry(
+        lambda: aba_destino.get(
+            "A4:I",
+            value_render_option="UNFORMATTED_VALUE"
+        ),
+        descricao="ler GERAL!A4:I para atualizar J:N"
+    )
+
+    time.sleep(PAUSA_APOS_LEITURA)
+
+    dados_geral = [
+        normalizar_linha(linha, 9)
+        for linha in dados_geral
+    ]
+
+    ultima_linha_util = 0
+
+    for i, linha in enumerate(dados_geral):
+        if linha_tem_dados(linha):
+            ultima_linha_util = i + 1
+
+    if ultima_linha_util == 0:
+        log("Nenhuma linha útil encontrada na GERAL para atualizar J:N.")
+
+        executar_com_retry(
+            lambda: aba_destino.batch_clear(["J4:N"]),
+            descricao="limpar GERAL!J4:N"
+        )
+
+        return
+
+    dados_geral = dados_geral[:ultima_linha_util]
+
+    valores_j_n = calcular_metricas_geral_j_n(
+        dados_geral=dados_geral,
+        mapas_bd=mapas_bd
+    )
+
+    log(f"Total de linhas que serão atualizadas em GERAL!J:N: {len(valores_j_n)}")
+
+    executar_com_retry(
+        lambda: aba_destino.batch_clear(["J4:N"]),
+        descricao="limpar GERAL!J4:N"
+    )
+
+    escrever_em_blocos(
+        aba=aba_destino,
+        dados=valores_j_n,
+        linha_inicial=4,
+        coluna_inicial="J"
+    )
+
+    log("Atualização completa de GERAL!J:N finalizada.")
+
+
 def atualizar_lookup_geral_todas_linhas(
     aba_destino,
     mapa_plan_principal,
@@ -405,344 +713,6 @@ def atualizar_lookup_geral_todas_linhas(
     )
 
     log("Atualização completa de GERAL!O:Q finalizada.")
-
-
-# ==========================
-# MÉTRICAS GERAL J:N
-# ==========================
-
-def normalizar_valor_chave(valor):
-    if valor is None:
-        return ""
-
-    try:
-        if pd.isna(valor):
-            return ""
-    except Exception:
-        pass
-
-    if isinstance(valor, datetime):
-        return str(data_para_serial_google_sheets(valor.date()))
-
-    if isinstance(valor, date):
-        return str(data_para_serial_google_sheets(valor))
-
-    if isinstance(valor, float):
-        if valor.is_integer():
-            return str(int(valor))
-        return str(valor).strip()
-
-    if isinstance(valor, int):
-        return str(valor)
-
-    texto = str(valor).strip()
-
-    data_valor = converter_para_data(texto)
-
-    if data_valor:
-        return str(data_para_serial_google_sheets(data_valor))
-
-    return texto
-
-
-def normalizar_texto_chave(valor):
-    if valor is None:
-        return ""
-
-    try:
-        if pd.isna(valor):
-            return ""
-    except Exception:
-        pass
-
-    if isinstance(valor, float):
-        if valor.is_integer():
-            return str(int(valor))
-        return str(valor).strip()
-
-    if isinstance(valor, int):
-        return str(valor)
-
-    return str(valor).strip()
-
-
-def converter_numero_seguro(valor):
-    if valor is None:
-        return 0.0
-
-    try:
-        if pd.isna(valor):
-            return 0.0
-    except Exception:
-        pass
-
-    if isinstance(valor, (int, float)):
-        return float(valor)
-
-    texto = str(valor).strip()
-
-    if texto == "":
-        return 0.0
-
-    texto = texto.replace("R$", "")
-    texto = texto.replace(" ", "")
-    texto = texto.replace("\u00a0", "")
-
-    if "," in texto and "." in texto:
-        if texto.rfind(",") > texto.rfind("."):
-            texto = texto.replace(".", "").replace(",", ".")
-        else:
-            texto = texto.replace(",", "")
-    elif "," in texto:
-        texto = texto.replace(".", "").replace(",", ".")
-
-    try:
-        return float(texto)
-    except Exception:
-        return 0.0
-
-
-def montar_chave_bd_serv_gpm_colunas(c, a, b):
-    c_txt = normalizar_texto_chave(c)
-    a_txt = normalizar_valor_chave(a)
-    b_txt = normalizar_texto_chave(b)
-
-    return c_txt + a_txt + b_txt
-
-
-def carregar_indices_bd_serv_gpm(planilha_destino):
-    log("Lendo BD_Serv_GPM para calcular GERAL!J:N...")
-
-    try:
-        aba_bd = executar_com_retry(
-            lambda: planilha_destino.worksheet(BD_SERV_GPM_ABA),
-            descricao=f"abrir aba {BD_SERV_GPM_ABA}"
-        )
-    except WorksheetNotFound:
-        log(f"Aba {BD_SERV_GPM_ABA} não encontrada. GERAL!J:N ficará vazio.")
-
-        return {
-            "soma_por_h": {},
-            "soma_por_j": {},
-            "soma_por_data_equipe": {},
-            "lookup_i": {},
-            "lookup_k": {},
-        }
-
-    dados = executar_com_retry(
-        lambda: aba_bd.get(
-            "D3:K",
-            value_render_option="UNFORMATTED_VALUE"
-        ),
-        descricao=f"ler {BD_SERV_GPM_ABA}!D3:K"
-    )
-
-    time.sleep(PAUSA_APOS_LEITURA)
-
-    soma_por_h = {}
-    soma_por_j = {}
-    soma_por_data_equipe = {}
-    lookup_i = {}
-    lookup_k = {}
-
-    for linha in dados:
-        linha = normalizar_linha(linha, 8)
-
-        valor_d = linha[0]  # D
-        valor_e = linha[1]  # E
-        valor_f = linha[2]  # F
-        valor_g = linha[3]  # G
-        valor_h = linha[4]  # H
-        valor_i = linha[5]  # I
-        valor_j = linha[6]  # J
-        valor_k = linha[7]  # K
-
-        equipe = normalizar_texto_chave(valor_d)
-        data_exec = normalizar_valor_chave(valor_f)
-        total = converter_numero_seguro(valor_g)
-
-        h = normalizar_texto_chave(valor_h)
-        j = normalizar_texto_chave(valor_j)
-
-        chave_data_equipe = (equipe, data_exec)
-        soma_por_data_equipe[chave_data_equipe] = soma_por_data_equipe.get(chave_data_equipe, 0.0) + total
-
-        chave_h = (h, equipe, data_exec)
-        soma_por_h[chave_h] = soma_por_h.get(chave_h, 0.0) + total
-
-        chave_j = (j, equipe, data_exec)
-        soma_por_j[chave_j] = soma_por_j.get(chave_j, 0.0) + total
-
-        chave_i = normalizar_texto_chave(valor_i)
-        chave_k = normalizar_texto_chave(valor_k)
-
-        if chave_i and chave_i not in lookup_i:
-            lookup_i[chave_i] = valor_e if valor_e not in [None, ""] else "-"
-
-        if chave_k and chave_k not in lookup_k:
-            lookup_k[chave_k] = valor_e if valor_e not in [None, ""] else "-"
-
-    log(
-        f"Índices BD_Serv_GPM carregados: "
-        f"H={len(soma_por_h)} | J={len(soma_por_j)} | "
-        f"DataEquipe={len(soma_por_data_equipe)} | "
-        f"I={len(lookup_i)} | K={len(lookup_k)}"
-    )
-
-    return {
-        "soma_por_h": soma_por_h,
-        "soma_por_j": soma_por_j,
-        "soma_por_data_equipe": soma_por_data_equipe,
-        "lookup_i": lookup_i,
-        "lookup_k": lookup_k,
-    }
-
-
-def calcular_metricas_geral_j_n(dados_geral, indices_bd):
-    resultado = []
-
-    soma_por_h = indices_bd["soma_por_h"]
-    soma_por_j = indices_bd["soma_por_j"]
-    soma_por_data_equipe = indices_bd["soma_por_data_equipe"]
-    lookup_i = indices_bd["lookup_i"]
-    lookup_k = indices_bd["lookup_k"]
-
-    for linha in dados_geral:
-        linha = normalizar_linha(linha, 8)
-
-        a = linha[0]  # A
-        b = linha[1]  # B
-        c = linha[2]  # C
-        e = linha[4]  # E
-        f = linha[5]  # F
-        h = linha[7]  # H
-
-        if normalizar_texto_chave(a) == "":
-            resultado.append(["", "", "", "", ""])
-            continue
-
-        data_a = normalizar_valor_chave(a)
-        equipe_b = normalizar_texto_chave(b)
-        codigo_c = normalizar_texto_chave(c)
-        codigo_h = normalizar_texto_chave(h)
-
-        valor_e = converter_numero_seguro(e)
-        valor_f = converter_numero_seguro(f)
-
-        # J
-        if valor_e == 0:
-            valor_j_final = 0
-        else:
-            chave_soma_h = (codigo_c, equipe_b, data_a)
-            valor_soma_h = soma_por_h.get(chave_soma_h, 0.0)
-
-            chave_soma_j = (codigo_c, equipe_b, data_a)
-            valor_soma_j = soma_por_j.get(chave_soma_j, 0.0)
-
-            valor_j_final = valor_soma_h + valor_soma_j
-
-        # K
-        if valor_j_final <= 0:
-            valor_k_final = ""
-        elif codigo_h != "" and codigo_h != codigo_c:
-            valor_k_final = 0
-        else:
-            if valor_e > 0:
-                valor_k_final = valor_j_final / valor_e
-            else:
-                valor_k_final = 1
-
-        # L
-        valor_l_final = soma_por_data_equipe.get((equipe_b, data_a), 0.0)
-
-        # M
-        if valor_f != 0:
-            valor_m_final = valor_l_final / valor_f
-        else:
-            valor_m_final = 0
-
-        # N
-        chave_n = montar_chave_bd_serv_gpm_colunas(codigo_c, a, equipe_b)
-
-        busca_i = lookup_i.get(chave_n, "-")
-
-        if busca_i == "-":
-            valor_n_final = lookup_k.get(chave_n, "-")
-        else:
-            valor_n_final = busca_i
-
-        resultado.append([
-            valor_j_final,
-            valor_k_final,
-            valor_l_final,
-            valor_m_final,
-            valor_n_final
-        ])
-
-    return resultado
-
-
-def atualizar_metricas_geral_todas_linhas(
-    planilha_destino,
-    aba_destino
-):
-    log("Atualizando GERAL!J:N para todas as linhas da aba GERAL...")
-
-    dados_geral = executar_com_retry(
-        lambda: aba_destino.get(
-            "A4:H",
-            value_render_option="UNFORMATTED_VALUE"
-        ),
-        descricao="ler GERAL!A4:H para atualizar J:N"
-    )
-
-    time.sleep(PAUSA_APOS_LEITURA)
-
-    dados_geral = [
-        normalizar_linha(linha, 8)
-        for linha in dados_geral
-    ]
-
-    ultima_linha_util = 0
-
-    for i, linha in enumerate(dados_geral):
-        if linha_tem_dados(linha):
-            ultima_linha_util = i + 1
-
-    if ultima_linha_util == 0:
-        log("Nenhuma linha útil encontrada na GERAL para atualizar J:N.")
-
-        executar_com_retry(
-            lambda: aba_destino.batch_clear(["J4:N"]),
-            descricao="limpar GERAL!J4:N"
-        )
-
-        return
-
-    dados_geral = dados_geral[:ultima_linha_util]
-
-    indices_bd = carregar_indices_bd_serv_gpm(planilha_destino)
-
-    metricas_j_n = calcular_metricas_geral_j_n(
-        dados_geral=dados_geral,
-        indices_bd=indices_bd
-    )
-
-    log(f"Total de linhas que serão atualizadas em GERAL!J:N: {len(metricas_j_n)}")
-
-    executar_com_retry(
-        lambda: aba_destino.batch_clear(["J4:N"]),
-        descricao="limpar GERAL!J4:N"
-    )
-
-    escrever_em_blocos(
-        aba=aba_destino,
-        dados=metricas_j_n,
-        linha_inicial=4,
-        coluna_inicial="J"
-    )
-
-    log("Atualização completa de GERAL!J:N finalizada.")
 
 
 def remover_linhas_vazias_base(dados, nome_bloco=""):
@@ -1477,6 +1447,14 @@ def executar_bloco_0(drive_service, sheets_service):
     log("INICIANDO BLOCO 0 - BANCO.csv > BD_ConsultaServ")
     log("======================================")
 
+    mapas_vazios = {
+        "soma_h_data_equipe": {},
+        "soma_j_data_equipe": {},
+        "soma_data_equipe": {},
+        "busca_i": {},
+        "busca_k": {},
+    }
+
     folder = executar_com_retry(
         lambda: drive_service.files().get(
             fileId=BLOCO0_NEW_FOLDER_ID,
@@ -1536,7 +1514,7 @@ def executar_bloco_0(drive_service, sheets_service):
     if not dfs:
         log("[BLOCO 0][ERRO] Nenhum CSV válido.")
         log("Bloco 0 finalizado sem dados.")
-        return
+        return mapas_vazios
 
     banco_df = pd.concat(dfs, ignore_index=True).drop_duplicates()
 
@@ -1591,6 +1569,12 @@ def executar_bloco_0(drive_service, sheets_service):
         float_format="%.2f"
     )
 
+    df_sheets_bloco0 = banco_df.iloc[:, :7].copy()
+    df_sheets_bloco0 = df_sheets_bloco0.fillna("")
+    df_sheets_bloco0 = bloco0_montar_colunas_h_i_j_k(df_sheets_bloco0)
+
+    mapas_bd_consulta_serv = bloco0_construir_mapas_bd_consulta_serv(df_sheets_bloco0)
+
     bloco0_upload_to_sheets(sheets_service, banco_df)
 
     if BLOCO0_UPLOAD_BANCO_PARA_DRIVE:
@@ -1616,6 +1600,8 @@ def executar_bloco_0(drive_service, sheets_service):
         log(f"[BLOCO 0][OK] BANCO.csv enviado ao Drive ({action}).")
 
     log("Bloco 0 finalizado com sucesso.")
+
+    return mapas_bd_consulta_serv
 
 
 # ==========================
@@ -1768,11 +1754,12 @@ def limpar_intervalos_geral(aba_destino, linha_inicio, linha_fim):
         return
 
     intervalo_dados = f"A{linha_inicio}:I{linha_fim}"
+    intervalo_metricas = f"J{linha_inicio}:N{linha_fim}"
     intervalo_lookup = f"O{linha_inicio}:Q{linha_fim}"
 
     executar_com_retry(
-        lambda: aba_destino.batch_clear([intervalo_dados, intervalo_lookup]),
-        descricao=f"limpar GERAL!{intervalo_dados} e GERAL!{intervalo_lookup}"
+        lambda: aba_destino.batch_clear([intervalo_dados, intervalo_metricas, intervalo_lookup]),
+        descricao=f"limpar GERAL!{intervalo_dados}, GERAL!{intervalo_metricas} e GERAL!{intervalo_lookup}"
     )
 
 
@@ -2391,7 +2378,8 @@ def executar_bloco_1(
     cache_planilhas,
     cache_dados,
     mapa_plan_principal,
-    mapa_reprogramadas
+    mapa_reprogramadas,
+    mapas_bd_consulta_serv
 ):
     log("")
     log("======================================")
@@ -2468,9 +2456,9 @@ def executar_bloco_1(
         data_referencia=data_referencia
     )
 
-    atualizar_metricas_geral_todas_linhas(
-        planilha_destino=planilha_destino,
-        aba_destino=aba_destino
+    atualizar_metricas_geral_j_n_todas_linhas(
+        aba_destino=aba_destino,
+        mapas_bd=mapas_bd_consulta_serv
     )
 
     atualizar_lookup_geral_todas_linhas(
@@ -2494,7 +2482,7 @@ def main():
     cache_planilhas = {}
     cache_dados = {}
 
-    executar_bloco_0(
+    mapas_bd_consulta_serv = executar_bloco_0(
         drive_service=drive_service,
         sheets_service=sheets_service
     )
@@ -2543,7 +2531,8 @@ def main():
         cache_planilhas=cache_planilhas,
         cache_dados=cache_dados,
         mapa_plan_principal=mapa_plan_principal,
-        mapa_reprogramadas=mapa_reprogramadas
+        mapa_reprogramadas=mapa_reprogramadas,
+        mapas_bd_consulta_serv=mapas_bd_consulta_serv
     )
 
     atualizar_timestamp_final(aba_config)
