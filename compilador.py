@@ -33,7 +33,10 @@ DESTINO_ID = "1x7-AjwlFgVmrjcHqFVypBdcN4_DoRaGYPy2ByxJvs1w"
 CONFIG_ABA = "Config"
 CELULA_DATA_REFERENCIA = "B2"
 CELULA_TIMESTAMP_FINAL = "B1"
-RANGE_IDS_ORIGEM = "B4:B"
+
+# Evita ler a coluna B inteira.
+# Ajuste o B50 caso futuramente tenha mais de 47 IDs.
+RANGE_IDS_ORIGEM = "B4:B50"
 
 TIMEZONE = "America/Sao_Paulo"
 
@@ -57,9 +60,10 @@ TAMANHO_BLOCO_ESCRITA = 10000
 PAUSA_APOS_LEITURA = 0.5
 PAUSA_APOS_ESCRITA = 1.0
 
-MAX_TENTATIVAS_API = 5
-ESPERA_INICIAL_429 = 8
-ESPERA_MAXIMA_429 = 45
+# Retry reforçado para erro 429/503 da API Google
+MAX_TENTATIVAS_API = 10
+ESPERA_INICIAL_429 = 15
+ESPERA_MAXIMA_429 = 120
 
 # Índices relativos ao intervalo base.
 # Para Sheets: B:BE
@@ -146,17 +150,25 @@ def executar_com_retry(funcao, descricao="operação Google API"):
             if not erro_temporario_api(erro):
                 raise
 
+            if tentativa == MAX_TENTATIVAS_API:
+                log(
+                    f"Erro temporário/API quota em '{descricao}' persistiu após "
+                    f"{MAX_TENTATIVAS_API} tentativas."
+                )
+                break
+
             espera = min(
                 ESPERA_MAXIMA_429,
                 ESPERA_INICIAL_429 * (2 ** (tentativa - 1))
             )
 
-            espera += random.uniform(1, 3)
+            espera += random.uniform(3, 10)
 
             log(
                 f"Aviso: erro temporário/API quota em '{descricao}'. "
                 f"Tentativa {tentativa}/{MAX_TENTATIVAS_API}. "
-                f"Aguardando {espera:.1f}s antes de tentar novamente."
+                f"Aguardando {espera:.1f}s antes de tentar novamente. "
+                f"Erro: {erro}"
             )
 
             time.sleep(espera)
@@ -499,14 +511,6 @@ def atualizar_timestamp_final(aba_config):
 # ==========================
 
 def localizar_bloco_data_geral(aba_destino, data_referencia):
-    """
-    Lê somente a coluna A da GERAL e encontra o bloco da data de referência.
-
-    Não ordena.
-    Não lê A:I inteiro.
-    Não regrava histórico inteiro.
-    """
-
     log("Lendo somente GERAL!A4:A para localizar a data de referência...")
 
     valores_coluna_a = executar_com_retry(
@@ -554,7 +558,7 @@ def localizar_bloco_data_geral(aba_destino, data_referencia):
         if quantidade != quantidade_exata:
             log(
                 "Aviso: a data de referência aparece em linhas não contínuas na GERAL. "
-                "O script vai considerar o menor bloco entre a primeira e a última ocorrência."
+                "O script vai considerar o bloco entre a primeira e a última ocorrência."
             )
 
         log(
