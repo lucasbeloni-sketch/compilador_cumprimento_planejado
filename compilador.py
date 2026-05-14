@@ -373,7 +373,17 @@ def construir_mapa_lookup(dados):
 
 
 def calcular_extras_geral(dados_geral, mapa_plan_principal, mapa_reprogramadas):
+    """
+    Calcula O:P e Q da aba GERAL como valores.
+
+    Q = A & B & C & E
+    O:P = busca Q primeiro no PLAN_PRINCIPAL, depois em REPROGRAMADAS.
+    Se não encontrar, retorna mensagem em O e P.
+    """
+
     extras = []
+
+    mensagem_nao_encontrado = "Não encontrado nas abas Plan_Principal e Reprogramadas"
 
     for linha in dados_geral:
         chave = calcular_chave_linha(linha)
@@ -388,11 +398,14 @@ def calcular_extras_geral(dados_geral, mapa_plan_principal, mapa_reprogramadas):
             valores = mapa_reprogramadas.get(chave)
 
         if valores is None:
-            valores = ["", ""]
+            valores = [
+                mensagem_nao_encontrado,
+                mensagem_nao_encontrado
+            ]
 
         extras.append([
-            valores[0] if len(valores) > 0 else "",
-            valores[1] if len(valores) > 1 else "",
+            valores[0] if len(valores) > 0 else mensagem_nao_encontrado,
+            valores[1] if len(valores) > 1 else mensagem_nao_encontrado,
             chave
         ])
 
@@ -435,16 +448,6 @@ def data_para_chave_serial(valor):
 def bloco0_construir_mapas_bd_consulta_serv(df_sheets):
     """
     Monta os mapas usados para calcular GERAL!J:N.
-
-    BD_ConsultaServ:
-    D = equipe
-    E = obs_servico
-    F = dta_exec_srv
-    G = total_servicos
-    H = código numérico extraído
-    J = código B- formatado
-    I = H & F & D
-    K = J & F*1 & D
     """
 
     mapas = {
@@ -505,12 +508,6 @@ def bloco0_construir_mapas_bd_consulta_serv(df_sheets):
 def calcular_metricas_geral_j_n(dados_geral, mapas_bd):
     """
     Calcula GERAL!J:N como valores fixos.
-
-    J = produção específica da obra/equipe/data
-    K = aderência J / E, com regra especial da coluna H
-    L = produção total da equipe/data
-    M = L / F
-    N = busca observação em BD_ConsultaServ pela chave C & A*1 & B
     """
 
     resultados = []
