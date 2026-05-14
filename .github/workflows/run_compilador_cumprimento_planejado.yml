@@ -3,7 +3,7 @@ name: Compilador Cumprimento Planejado
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 10 * * *"
+    - cron: "0 */2 * * *"
 
 concurrency:
   group: compilador-cumprimento-planejado
