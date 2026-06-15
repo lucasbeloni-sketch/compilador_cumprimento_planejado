@@ -13,7 +13,8 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import compilador as c
+# As funções puras vivem em parsers.py após o split do monólito.
+import parsers as c
 
 
 # ---------------------------------------------------------------------------
