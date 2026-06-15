@@ -1,0 +1,15 @@
+# Credenciais — NUNCA commitar
+service_account.json
+*.json.b64
+
+# Saída / temporários do script
+BANCO.csv
+tmp_bloco0_*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
