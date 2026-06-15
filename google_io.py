@@ -19,6 +19,7 @@ from config import (
     BLOCO0_SPREADSHEET_ID,
     CELULA_TIMESTAMP_FINAL,
     COLUNAS_MOEDA_DESTINO,
+    COLUNAS_PERCENTUAL_DESTINO,
     CONFIG_ABA,
     ESPERA_INICIAL_429,
     ESPERA_MAXIMA_429,
@@ -259,6 +260,17 @@ def aplicar_formatacao_destino(planilha_destino, aba_destino):
             coluna_fim=coluna + 1,
             tipo="CURRENCY",
             padrao='"R$" #,##0.00'
+        )
+
+    for coluna in COLUNAS_PERCENTUAL_DESTINO:
+        # NUMBER com "%" literal (não PERCENT, que multiplicaria por 100).
+        # O valor é o número puro (ex.: 117) -> exibe "117%". Vale também para
+        # as linhas históricas da GERAL já gravadas como número.
+        adicionar_formatacao_coluna(
+            coluna_inicio=coluna,
+            coluna_fim=coluna + 1,
+            tipo="NUMBER",
+            padrao='0"%"'
         )
 
     if requests:

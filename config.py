@@ -83,6 +83,13 @@ COLUNA_DATA_DESTINO = 0
 COLUNAS_MOEDA_DESTINO = [
     4,  # E
     5,  # F
+]
+
+
+# G é porcentagem (ex.: "117%"), não moeda. Fica fora de COLUNAS_MOEDA_DESTINO
+# para não ter o "%" removido por converter_moeda_para_numero; o valor cru
+# "117%" é gravado com USER_ENTERED e o Sheets interpreta como percentual.
+COLUNAS_PERCENTUAL_DESTINO = [
     6,  # G
 ]
 

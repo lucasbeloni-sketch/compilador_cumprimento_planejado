@@ -9,6 +9,7 @@ import re
 from config import (
     BLOCO0_DATE_REGEX,
     COLUNAS_MOEDA_DESTINO,
+    COLUNAS_PERCENTUAL_DESTINO,
     COLUNAS_ORIGEM_SELECIONADAS,
     COLUNA_DATA_DESTINO,
     COLUNA_ORIGEM_EXTRA_1,
@@ -494,6 +495,39 @@ def converter_moeda_para_numero(valor):
         return valor
 
 
+def converter_percentual_para_numero(valor):
+    """
+    Converte um percentual de texto no número correspondente SEM dividir por
+    100: "117%" -> 117, "98,5%" -> 98.5, ""/"-" -> "".
+
+    O sinal de "%" fica a cargo da formatação da planilha (padrão 0"%", tipo
+    NUMBER, que NÃO multiplica por 100). Manter o valor como número puro (117)
+    preserva as linhas históricas da GERAL já gravadas assim — evita migração
+    e evita que o formato de porcentagem mostre "11700%".
+    """
+    if valor is None:
+        return ""
+
+    if isinstance(valor, (int, float)):
+        return valor
+
+    texto = str(valor).strip()
+
+    if texto in ["", "-", "—"]:
+        return ""
+
+    texto = texto.replace("%", "").replace(" ", "").replace(" ", "")
+    texto = _normalizar_separadores_ptbr(texto)
+
+    if not texto:
+        return ""
+
+    try:
+        return float(texto)
+    except Exception:
+        return valor
+
+
 def eh_data_referencia(valor, data_referencia):
     data_valor = converter_para_data(valor)
     return data_valor == data_referencia
@@ -535,6 +569,10 @@ def preparar_linha_para_envio(linha, qtd_colunas_destino):
     for indice in COLUNAS_MOEDA_DESTINO:
         if indice < len(linha):
             linha[indice] = converter_moeda_para_numero(linha[indice])
+
+    for indice in COLUNAS_PERCENTUAL_DESTINO:
+        if indice < len(linha):
+            linha[indice] = converter_percentual_para_numero(linha[indice])
 
     return linha
 

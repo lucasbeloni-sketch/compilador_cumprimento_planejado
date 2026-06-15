@@ -117,6 +117,30 @@ class TestConverterMoeda:
 
 
 # ---------------------------------------------------------------------------
+# converter_percentual_para_numero  (coluna G: percentual, % literal)
+# ---------------------------------------------------------------------------
+
+class TestConverterPercentual:
+    def test_percent_inteiro_sem_dividir(self):
+        # NÃO divide por 100: "117%" -> 117 (o "%" é formatação)
+        assert c.converter_percentual_para_numero("117%") == 117.0
+
+    def test_percent_com_decimal(self):
+        assert c.converter_percentual_para_numero("98,5%") == 98.5
+
+    def test_sem_simbolo(self):
+        assert c.converter_percentual_para_numero("100") == 100.0
+
+    def test_numerico_passa_direto(self):
+        assert c.converter_percentual_para_numero(117) == 117
+
+    def test_vazio_e_traco(self):
+        assert c.converter_percentual_para_numero("") == ""
+        assert c.converter_percentual_para_numero("-") == ""
+        assert c.converter_percentual_para_numero(None) == ""
+
+
+# ---------------------------------------------------------------------------
 # bloco0_to_number_ptbr  (alvo do fix de corrupção de milhar)
 # ---------------------------------------------------------------------------
 
