@@ -136,6 +136,9 @@ def erro_temporario_api(erro):
     if status in [429, 500, 502, 503, 504]:
         return True
 
+    # Apenas frases específicas. Números soltos ("500" etc.) foram removidos:
+    # casavam com texto não relacionado (ex.: "row 5002 invalid") e disparavam
+    # retries inúteis. O status code acima já cobre os erros HTTP reais.
     termos = [
         "quota exceeded",
         "read requests per minute",
@@ -144,11 +147,6 @@ def erro_temporario_api(erro):
         "backend error",
         "internal error",
         "service unavailable",
-        "429",
-        "500",
-        "502",
-        "503",
-        "504",
     ]
 
     return any(termo in texto for termo in termos)
@@ -1121,10 +1119,22 @@ def bloco0_to_number_ptbr(value):
     if s == "" or s.lower() in ("nan", "none"):
         return 0.0
 
-    s = s.replace(" ", "")
+    s = s.replace(" ", "").replace(" ", "")
 
-    if "," in s:
+    if "," in s and "." in s:
+        # Ambos separadores: o mais à direita é o decimal.
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
         s = s.replace(".", "").replace(",", ".")
+    elif "." in s:
+        # Só ponto: trata como milhar se o último grupo tiver 3 dígitos
+        # (ex.: "1.234" -> 1234). Caso contrário é decimal (ex.: "1.50").
+        partes = s.split(".")
+        if len(partes) > 1 and len(partes[-1]) == 3:
+            s = s.replace(".", "")
 
     try:
         return float(s)
