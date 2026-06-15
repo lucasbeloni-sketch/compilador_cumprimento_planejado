@@ -685,12 +685,18 @@ def executar_bloco_2(
 
         primeira_linha_sobra = 4 + len(dados_com_chave)
 
-        log(f"Limpando sobras antigas em REPROGRAMADAS!A{primeira_linha_sobra}:L...")
+        # Só limpa se houver linhas abaixo do novo bloco dentro do grid.
+        # Sem isso, um range que começa após a última linha (ex.: A1761 num
+        # grid de 1760 linhas) gera "exceeds grid limits".
+        if primeira_linha_sobra <= aba_destino.row_count:
+            log(f"Limpando sobras antigas em REPROGRAMADAS!A{primeira_linha_sobra}:L...")
 
-        executar_com_retry(
-            lambda: aba_destino.batch_clear([f"A{primeira_linha_sobra}:L"]),
-            descricao=f"limpar sobras REPROGRAMADAS!A{primeira_linha_sobra}:L"
-        )
+            executar_com_retry(
+                lambda: aba_destino.batch_clear([f"A{primeira_linha_sobra}:L"]),
+                descricao=f"limpar sobras REPROGRAMADAS!A{primeira_linha_sobra}:L"
+            )
+        else:
+            log("Sem sobras antigas para limpar em REPROGRAMADAS.")
     else:
         log("Nenhum dado novo. Limpando A4:L da aba REPROGRAMADAS...")
 
@@ -783,12 +789,17 @@ def executar_bloco_3(
 
         primeira_linha_sobra = 4 + len(dados_com_chave)
 
-        log(f"Limpando sobras antigas em PLAN_PRINCIPAL!A{primeira_linha_sobra}:L...")
+        # Só limpa se houver linhas abaixo do novo bloco dentro do grid
+        # (mesmo motivo do Bloco 2: evita "exceeds grid limits").
+        if primeira_linha_sobra <= aba_destino.row_count:
+            log(f"Limpando sobras antigas em PLAN_PRINCIPAL!A{primeira_linha_sobra}:L...")
 
-        executar_com_retry(
-            lambda: aba_destino.batch_clear([f"A{primeira_linha_sobra}:L"]),
-            descricao=f"limpar sobras PLAN_PRINCIPAL!A{primeira_linha_sobra}:L"
-        )
+            executar_com_retry(
+                lambda: aba_destino.batch_clear([f"A{primeira_linha_sobra}:L"]),
+                descricao=f"limpar sobras PLAN_PRINCIPAL!A{primeira_linha_sobra}:L"
+            )
+        else:
+            log("Sem sobras antigas para limpar em PLAN_PRINCIPAL.")
     else:
         log("Nenhum dado novo. Limpando A4:L da aba PLAN_PRINCIPAL...")
 
