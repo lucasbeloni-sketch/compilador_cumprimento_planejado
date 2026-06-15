@@ -662,17 +662,14 @@ def executar_bloco_2(
 
     dados_com_chave = adicionar_chave_l(dados)
 
-    log("Limpando A4:L da aba REPROGRAMADAS...")
-
-    executar_com_retry(
-        lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO_COM_CHAVE]),
-        descricao="limpar REPROGRAMADAS!A4:L"
-    )
-
     log("Aplicando formatação na aba REPROGRAMADAS...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
+    # Escreve por cima e só então limpa a sobra abaixo (em vez de limpar tudo
+    # antes de escrever). Assim, se a escrita falhar, a aba não fica vazia:
+    # no pior caso ficam dados novos no topo + dados antigos embaixo, que o
+    # próximo run corrige. Evita janela de aba zerada quebrando os lookups.
     if dados_com_chave:
         ultima_linha_necessaria = 3 + len(dados_com_chave)
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
@@ -685,8 +682,22 @@ def executar_bloco_2(
             linha_inicial=4,
             coluna_inicial="A"
         )
+
+        primeira_linha_sobra = 4 + len(dados_com_chave)
+
+        log(f"Limpando sobras antigas em REPROGRAMADAS!A{primeira_linha_sobra}:L...")
+
+        executar_com_retry(
+            lambda: aba_destino.batch_clear([f"A{primeira_linha_sobra}:L"]),
+            descricao=f"limpar sobras REPROGRAMADAS!A{primeira_linha_sobra}:L"
+        )
     else:
-        log("Nenhum dado para gravar na aba REPROGRAMADAS.")
+        log("Nenhum dado novo. Limpando A4:L da aba REPROGRAMADAS...")
+
+        executar_com_retry(
+            lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO_COM_CHAVE]),
+            descricao="limpar REPROGRAMADAS!A4:L"
+        )
 
     log("Bloco 2 finalizado com sucesso.")
 
@@ -751,17 +762,12 @@ def executar_bloco_3(
 
     dados_com_chave = adicionar_chave_l(dados)
 
-    log("Limpando A4:L da aba PLAN_PRINCIPAL...")
-
-    executar_com_retry(
-        lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO_COM_CHAVE]),
-        descricao="limpar PLAN_PRINCIPAL!A4:L"
-    )
-
     log("Aplicando formatação na aba PLAN_PRINCIPAL...")
 
     aplicar_formatacao_destino(planilha_destino, aba_destino)
 
+    # Escreve por cima e só então limpa a sobra abaixo (mesma estratégia do
+    # Bloco 2): evita janela de aba vazia caso a escrita falhe.
     if dados_com_chave:
         ultima_linha_necessaria = 3 + len(dados_com_chave)
         garantir_linhas_suficientes(aba_destino, ultima_linha_necessaria)
@@ -774,8 +780,22 @@ def executar_bloco_3(
             linha_inicial=4,
             coluna_inicial="A"
         )
+
+        primeira_linha_sobra = 4 + len(dados_com_chave)
+
+        log(f"Limpando sobras antigas em PLAN_PRINCIPAL!A{primeira_linha_sobra}:L...")
+
+        executar_com_retry(
+            lambda: aba_destino.batch_clear([f"A{primeira_linha_sobra}:L"]),
+            descricao=f"limpar sobras PLAN_PRINCIPAL!A{primeira_linha_sobra}:L"
+        )
     else:
-        log("Nenhum dado para gravar na aba PLAN_PRINCIPAL.")
+        log("Nenhum dado novo. Limpando A4:L da aba PLAN_PRINCIPAL...")
+
+        executar_com_retry(
+            lambda: aba_destino.batch_clear([DESTINO_RANGE_COMPLETO_COM_CHAVE]),
+            descricao="limpar PLAN_PRINCIPAL!A4:L"
+        )
 
     log("Bloco 3 finalizado com sucesso.")
 
