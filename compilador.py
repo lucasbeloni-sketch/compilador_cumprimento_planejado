@@ -191,6 +191,25 @@ def executar_com_retry(funcao, descricao="operação Google API"):
     raise ultimo_erro
 
 
+def executar_etapa(nome, funcao):
+    """
+    Executa uma etapa de alto nível do processo registrando início e falha.
+
+    Em caso de erro, loga o nome da etapa e o tipo do erro (para o log do
+    GitHub Actions deixar claro ONDE falhou) e re-lança. As etapas são
+    interdependentes (o Bloco 1 depende dos mapas dos Blocos 0/2/3), então
+    não há como "continuar"; a propagação encerra o run com código != 0.
+    """
+    log("")
+    log(f">>> Etapa: {nome}")
+
+    try:
+        return funcao()
+    except Exception as erro:
+        log(f"!!! FALHA na etapa '{nome}': {type(erro).__name__}: {erro}")
+        raise
+
+
 # ==========================
 # AUTENTICAÇÃO
 # ==========================
@@ -290,6 +309,35 @@ def texto_chave(valor):
     return str(valor).strip()
 
 
+def _normalizar_separadores_ptbr(texto):
+    """
+    Normaliza separadores de n\u00famero pt-BR para uma string parse\u00e1vel por float().
+
+    Regras:
+    - v\u00edrgula e ponto: o separador mais \u00e0 direita \u00e9 o decimal;
+    - s\u00f3 v\u00edrgula: v\u00edrgula \u00e9 decimal, ponto vira milhar;
+    - s\u00f3 ponto: trata como milhar se o \u00faltimo grupo tiver 3 d\u00edgitos
+      ("1.234" -> "1234"); caso contr\u00e1rio \u00e9 decimal ("1.50" preservado).
+
+    N\u00e3o remove "R$", espa\u00e7os ou sinais \u2014 isso \u00e9 responsabilidade de quem chama.
+    Core \u00fanico compartilhado por numero_calculo, converter_moeda_para_numero
+    e bloco0_to_number_ptbr.
+    """
+    if "," in texto and "." in texto:
+        if texto.rfind(",") > texto.rfind("."):
+            texto = texto.replace(".", "").replace(",", ".")
+        else:
+            texto = texto.replace(",", "")
+    elif "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    elif "." in texto:
+        partes = texto.split(".")
+        if len(partes) > 1 and len(partes[-1]) == 3:
+            texto = texto.replace(".", "")
+
+    return texto
+
+
 def numero_calculo(valor):
     if valor is None:
         return 0.0
@@ -312,13 +360,7 @@ def numero_calculo(valor):
     texto = texto.replace(" ", "")
     texto = texto.replace("\u00a0", "")
 
-    if "," in texto and "." in texto:
-        if texto.rfind(",") > texto.rfind("."):
-            texto = texto.replace(".", "").replace(",", ".")
-        else:
-            texto = texto.replace(",", "")
-    elif "," in texto:
-        texto = texto.replace(".", "").replace(",", ".")
+    texto = _normalizar_separadores_ptbr(texto)
 
     try:
         return float(texto)
@@ -812,17 +854,7 @@ def converter_moeda_para_numero(valor):
         negativo = True
         texto = texto.replace("-", "")
 
-    if "," in texto and "." in texto:
-        if texto.rfind(",") > texto.rfind("."):
-            texto = texto.replace(".", "").replace(",", ".")
-        else:
-            texto = texto.replace(",", "")
-    elif "," in texto:
-        texto = texto.replace(".", "").replace(",", ".")
-    elif "." in texto:
-        partes = texto.split(".")
-        if len(partes[-1]) == 3 and len(partes) > 1:
-            texto = texto.replace(".", "")
+    texto = _normalizar_separadores_ptbr(texto)
 
     try:
         numero = float(texto)
@@ -1121,20 +1153,7 @@ def bloco0_to_number_ptbr(value):
 
     s = s.replace(" ", "").replace(" ", "")
 
-    if "," in s and "." in s:
-        # Ambos separadores: o mais à direita é o decimal.
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    elif "," in s:
-        s = s.replace(".", "").replace(",", ".")
-    elif "." in s:
-        # Só ponto: trata como milhar se o último grupo tiver 3 dígitos
-        # (ex.: "1.234" -> 1234). Caso contrário é decimal (ex.: "1.50").
-        partes = s.split(".")
-        if len(partes) > 1 and len(partes[-1]) == 3:
-            s = s.replace(".", "")
+    s = _normalizar_separadores_ptbr(s)
 
     try:
         return float(s)
@@ -2484,69 +2503,102 @@ def executar_bloco_1(
 def main():
     log("Iniciando compilador...")
 
-    gc, drive_service, sheets_service = autenticar_google()
+    gc, drive_service, sheets_service = executar_etapa(
+        "Autenticação Google",
+        lambda: autenticar_google()
+    )
 
     cache_planilhas = {}
     cache_dados = {}
 
-    mapas_bd_consulta_serv = executar_bloco_0(
-        drive_service=drive_service,
-        sheets_service=sheets_service
+    mapas_bd_consulta_serv = executar_etapa(
+        "Bloco 0 - BANCO.csv > BD_ConsultaServ",
+        lambda: executar_bloco_0(
+            drive_service=drive_service,
+            sheets_service=sheets_service
+        )
     )
 
-    planilha_destino = executar_com_retry(
-        lambda: gc.open_by_key(DESTINO_ID),
-        descricao="abrir planilha destino"
-    )
-
-    aba_config = executar_com_retry(
-        lambda: planilha_destino.worksheet(CONFIG_ABA),
-        descricao="abrir aba Config"
-    )
-
-    ids_origem = ler_ids_planilhas_origem(aba_config)
-
-    if not ids_origem:
-        raise Exception(
-            f"Nenhum ID de planilha de origem encontrado no intervalo {CONFIG_ABA}!{RANGE_IDS_ORIGEM}."
+    def abrir_destino_e_ids():
+        planilha_destino = executar_com_retry(
+            lambda: gc.open_by_key(DESTINO_ID),
+            descricao="abrir planilha destino"
         )
 
-    log(f"Quantidade de planilhas de origem encontradas: {len(ids_origem)}")
+        aba_config = executar_com_retry(
+            lambda: planilha_destino.worksheet(CONFIG_ABA),
+            descricao="abrir aba Config"
+        )
 
-    mapa_reprogramadas = executar_bloco_2(
-        gc=gc,
-        planilha_destino=planilha_destino,
-        ids_origem=ids_origem,
-        cache_planilhas=cache_planilhas,
-        cache_dados=cache_dados
+        ids_origem = ler_ids_planilhas_origem(aba_config)
+
+        if not ids_origem:
+            raise Exception(
+                f"Nenhum ID de planilha de origem encontrado no intervalo {CONFIG_ABA}!{RANGE_IDS_ORIGEM}."
+            )
+
+        log(f"Quantidade de planilhas de origem encontradas: {len(ids_origem)}")
+
+        return planilha_destino, aba_config, ids_origem
+
+    planilha_destino, aba_config, ids_origem = executar_etapa(
+        "Abrir destino e ler IDs de origem",
+        abrir_destino_e_ids
     )
 
-    mapa_plan_principal = executar_bloco_3(
-        gc=gc,
-        drive_service=drive_service,
-        planilha_destino=planilha_destino,
-        ids_origem=ids_origem,
-        cache_planilhas=cache_planilhas,
-        cache_dados=cache_dados
+    mapa_reprogramadas = executar_etapa(
+        "Bloco 2 - REPROGRAMADAS",
+        lambda: executar_bloco_2(
+            gc=gc,
+            planilha_destino=planilha_destino,
+            ids_origem=ids_origem,
+            cache_planilhas=cache_planilhas,
+            cache_dados=cache_dados
+        )
     )
 
-    executar_bloco_1(
-        gc=gc,
-        planilha_destino=planilha_destino,
-        aba_config=aba_config,
-        ids_origem=ids_origem,
-        cache_planilhas=cache_planilhas,
-        cache_dados=cache_dados,
-        mapa_plan_principal=mapa_plan_principal,
-        mapa_reprogramadas=mapa_reprogramadas,
-        mapas_bd_consulta_serv=mapas_bd_consulta_serv
+    mapa_plan_principal = executar_etapa(
+        "Bloco 3 - PLAN_PRINCIPAL",
+        lambda: executar_bloco_3(
+            gc=gc,
+            drive_service=drive_service,
+            planilha_destino=planilha_destino,
+            ids_origem=ids_origem,
+            cache_planilhas=cache_planilhas,
+            cache_dados=cache_dados
+        )
     )
 
-    atualizar_timestamp_final(aba_config)
+    executar_etapa(
+        "Bloco 1 - GERAL",
+        lambda: executar_bloco_1(
+            gc=gc,
+            planilha_destino=planilha_destino,
+            aba_config=aba_config,
+            ids_origem=ids_origem,
+            cache_planilhas=cache_planilhas,
+            cache_dados=cache_dados,
+            mapa_plan_principal=mapa_plan_principal,
+            mapa_reprogramadas=mapa_reprogramadas,
+            mapas_bd_consulta_serv=mapas_bd_consulta_serv
+        )
+    )
+
+    executar_etapa(
+        "Atualizar timestamp final",
+        lambda: atualizar_timestamp_final(aba_config)
+    )
 
     log("")
     log("Processo completo finalizado com sucesso.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as erro:
+        log("")
+        log("======================================")
+        log(f"PROCESSO ABORTADO: {type(erro).__name__}: {erro}")
+        log("======================================")
+        sys.exit(1)

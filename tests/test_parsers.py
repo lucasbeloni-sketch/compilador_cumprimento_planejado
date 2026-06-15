@@ -146,6 +146,34 @@ class TestBloco0ToNumber:
 
 
 # ---------------------------------------------------------------------------
+# _normalizar_separadores_ptbr  (core compartilhado pelos 3 parsers)
+# ---------------------------------------------------------------------------
+
+class TestNormalizarSeparadores:
+    def test_milhar_so_ponto(self):
+        assert c._normalizar_separadores_ptbr("1.234") == "1234"
+
+    def test_decimal_dois_digitos(self):
+        assert c._normalizar_separadores_ptbr("1.50") == "1.50"
+
+    def test_milhar_e_decimal(self):
+        assert c._normalizar_separadores_ptbr("1.234,56") == "1234.56"
+
+    def test_so_virgula(self):
+        assert c._normalizar_separadores_ptbr("12,5") == "12.5"
+
+    def test_sem_separador(self):
+        assert c._normalizar_separadores_ptbr("123") == "123"
+
+    def test_consistencia_entre_parsers(self):
+        # Os 3 parsers devem concordar no valor numérico para a mesma entrada.
+        for entrada in ["1.234", "1.234,56", "1.50", "1.000.000", "12,5"]:
+            esperado = c.numero_calculo(entrada)
+            assert c.bloco0_to_number_ptbr(entrada) == esperado
+            assert float(c.converter_moeda_para_numero(entrada)) == esperado
+
+
+# ---------------------------------------------------------------------------
 # calcular_chave_linha  (Q = A & B & C & E, pula índice 3)
 # ---------------------------------------------------------------------------
 
